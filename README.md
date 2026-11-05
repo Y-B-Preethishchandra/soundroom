@@ -28,6 +28,28 @@ npm run build:ipa
 
 `npm run build:apk` creates an Android APK for direct installation. `npm run build:ipa` creates an iOS IPA for internal distribution. EAS prints a build page and download link when each build completes. iOS internal builds require Apple Developer signing credentials and the target device must be registered with the provisioning profile.
 
+### Build an Android APK locally
+
+To build without uploading the project to Expo, install a JDK and Android SDK, then run:
+
+```sh
+npm install
+npm run build:apk:local
+```
+
+This generates the Android project with Expo and builds a standalone release APK locally at `build/local-apk/Soundroom.apk`. The APK is signed with the generated project's default debug key and can be installed directly on a device; it is intended for personal testing, not Play Store distribution. Set `ANDROID_HOME` or `ANDROID_SDK_ROOT` if your SDK is not in its standard location. This does not use EAS or upload the project to Expo.
+
+### Install on iPhone with SideStore (free Apple ID)
+
+On a Mac with Xcode installed, run:
+
+```sh
+npm install
+npm run build:sidestore
+```
+
+This generates the iOS project with Expo, builds an unsigned device app locally, and packages it as `build/sidestore/Soundroom-SideStore.ipa`. Transfer that IPA to your iPhone (for example, with AirDrop), open it in SideStore, and install it. SideStore handles signing with your Apple ID; a paid Apple Developer account is not needed. Apps signed with a free account expire after 7 days, so refresh Soundroom in SideStore regularly. This local workflow does not use EAS cloud signing.
+
 ## Add music
 
 Open **Settings → Music Library** to choose **Add music from files** or **Import a music folder**. Soundroom accepts common formats including MP3, AAC/M4A/M4B, FLAC, WAV, AIFF, CAF, AMR, 3GP, Ogg Vorbis, and Opus. Audio MIME types reported by the file picker are also accepted, so additional formats can be imported. Actual playback depends on the codecs available in the device OS or browser; protected or unsupported files may not play. These import actions copy selected songs into private app storage so they remain available in the library; the originals are not moved or deleted. Folder selection is supported on Android and iOS, and in browsers that support directory uploads. Remove a song from the library with the × button beside it.

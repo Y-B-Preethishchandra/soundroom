@@ -38,7 +38,9 @@
     "web": "expo start --web",
     "eas:init": "npx eas-cli@latest init",
     "build:apk": "npx eas-cli@latest build --platform android --profile apk",
+    "build:apk:local": "bash scripts/build-apk-local.sh",
     "build:ipa": "npx eas-cli@latest build --platform ios --profile ipa",
+    "build:sidestore": "bash scripts/build-sidestore-ipa.sh",
     "lint": "expo lint",
     "postinstall": "patch-package"
   },
