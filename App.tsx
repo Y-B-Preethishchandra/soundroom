@@ -383,7 +383,7 @@ type DockIconName =
   | 'playlists'
   | 'files'
   | 'folder'
-  | 'add'
+  | 'settings'
   | 'play'
   | 'pause';
 
@@ -395,6 +395,7 @@ const BROWSE_MODES: { id: BrowseMode; label: string; icon: DockIconName }[] = [
   { id: 'genres', label: 'Genres', icon: 'genres' },
   { id: 'playlists', label: 'Playlists', icon: 'playlists' },
 ];
+const BROWSE_MENU_MODES = BROWSE_MODES.filter((mode) => mode.id !== 'playlists');
 
 function DockIcon({ name, color }: { name: DockIconName; color: string }) {
   const strokeStyle = { borderColor: color };
@@ -482,13 +483,8 @@ function DockIcon({ name, color }: { name: DockIconName; color: string }) {
           <View style={[dockIconStyles.folderBody, strokeStyle]} />
         </View>
       );
-    case 'add':
-      return (
-        <View style={[dockIconStyles.icon, dockIconStyles.addIcon]}>
-          <View style={[dockIconStyles.addBarHorizontal, fillStyle]} />
-          <View style={[dockIconStyles.addBarVertical, fillStyle]} />
-        </View>
-      );
+    case 'settings':
+      return <Text style={{ color, fontSize: 19, lineHeight: 21 }}>⚙</Text>;
     case 'play':
       return (
         <View style={dockIconStyles.icon}>
@@ -726,22 +722,6 @@ const dockIconStyles = StyleSheet.create({
     borderWidth: 1.3,
     borderRadius: 2,
     backgroundColor: 'transparent',
-  },
-  addIcon: {
-    width: 20,
-    height: 20,
-  },
-  addBarHorizontal: {
-    position: 'absolute',
-    width: 16,
-    height: 2,
-    borderRadius: 2,
-  },
-  addBarVertical: {
-    position: 'absolute',
-    width: 2,
-    height: 16,
-    borderRadius: 2,
   },
   playTriangle: {
     width: 0,
@@ -1364,7 +1344,6 @@ function MusicPlayer() {
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [playbackQueue, setPlaybackQueue] = useState<Track[]>([]);
   const [playerVolume, setPlayerVolume] = useState(1);
-  const [isAddMenuOpen, setIsAddMenuOpen] = useState(false);
   const [trackOptionsTrack, setTrackOptionsTrack] = useState<Track | null>(null);
   const [detailsTrack, setDetailsTrack] = useState<Track | null>(null);
   const [playlistTrack, setPlaylistTrack] = useState<Track | null>(null);
@@ -1376,6 +1355,7 @@ function MusicPlayer() {
   const [playback, setPlayback] = useState({ currentTime: 0, duration: 0, playing: false });
   const [search, setSearch] = useState('');
   const [browseMode, setBrowseMode] = useState<BrowseMode>('songs');
+  const [isBrowseMenuOpen, setIsBrowseMenuOpen] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>('name');
   const [selectedGroup, setSelectedGroup] = useState<LibraryGroup | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -1386,6 +1366,7 @@ function MusicPlayer() {
   const [isScanningDropFolder, setIsScanningDropFolder] = useState(false);
   const [dropFolderScanRequest, setDropFolderScanRequest] = useState(0);
   const [isPlayerOpen, setIsPlayerOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isQueueOpen, setIsQueueOpen] = useState(false);
   const [isAddingQueueTracks, setIsAddingQueueTracks] = useState(false);
   const [draggingQueueTrackId, setDraggingQueueTrackId] = useState<string | null>(null);
@@ -1417,17 +1398,18 @@ function MusicPlayer() {
     if (Platform.OS === 'web') return;
 
     let active = true;
-    let volumeChanged = false;
+    const requestVersion = volumeChangeVersion.current;
     const subscription = VolumeManager.addVolumeListener(({ volume, type }) => {
       if (Platform.OS === 'android' && type !== undefined && type !== 'music') return;
-      volumeChanged = true;
       volumeChangeVersion.current += 1;
       setPlayerVolume(volume);
     });
 
     void VolumeManager.getVolume()
       .then(({ volume }) => {
-        if (active && !volumeChanged) setPlayerVolume(volume);
+        if (active && volumeChangeVersion.current === requestVersion) {
+          setPlayerVolume(volume);
+        }
       })
       .catch((error: unknown) => {
         if (active) setNotice(`Could not read system media volume: ${errorMessage(error)}`);
@@ -2246,7 +2228,10 @@ function MusicPlayer() {
       savedWebFiles: string[];
       createdWebUrls: string[];
     },
-    { showNotice = true }: { showNotice?: boolean } = {},
+    {
+      showNotice = true,
+      copyToAppStorage = true,
+    }: { showNotice?: boolean; copyToAppStorage?: boolean } = {},
   ) => {
     const knownSourceUris = new Set(
       tracksRef.current.flatMap((track) => [track.sourceUri, track.uri].filter(Boolean) as string[]),
@@ -2268,7 +2253,9 @@ function MusicPlayer() {
     }
 
     const musicDirectory =
-      Platform.OS === 'web' ? null : new Directory(Paths.document, MUSIC_FOLDER);
+      Platform.OS === 'web' || !copyToAppStorage
+        ? null
+        : new Directory(Paths.document, MUSIC_FOLDER);
     musicDirectory?.create({ intermediates: true, idempotent: true });
 
     const importedTracks: Track[] = [];
@@ -2304,16 +2291,21 @@ function MusicPlayer() {
           if (!asset.uri) {
             throw new Error(`The selected audio file ${asset.name} is not available.`);
           }
-          const safeName = asset.name.replace(/[\\/:*?"<>|]/g, '_') || 'audio';
-          const destination = new File(musicDirectory!, `${id}-${safeName}`);
-          copiedFile = destination;
-          await new File(asset.uri).copy(destination);
+          const sourceFile = new File(asset.uri);
+          let trackUri = sourceFile.uri;
+          if (copyToAppStorage) {
+            const safeName = asset.name.replace(/[\\/:*?"<>|]/g, '_') || 'audio';
+            const destination = new File(musicDirectory!, `${id}-${safeName}`);
+            copiedFile = destination;
+            await sourceFile.copy(destination);
+            trackUri = destination.uri;
+          }
           importedTrack = {
             id,
-            uri: destination.uri,
+            uri: trackUri,
             fileName: asset.name,
-            sourceUri: asset.sourceUri,
-            ...fallbackTrackMetadata(destination, fallback),
+            sourceUri: copyToAppStorage ? asset.sourceUri : sourceFile.uri,
+            ...fallbackTrackMetadata(copyToAppStorage ? copiedFile! : sourceFile, fallback),
             addedAt,
           };
         }
@@ -2352,8 +2344,9 @@ function MusicPlayer() {
         continue;
       }
 
-      const metadataFile =
-        Platform.OS === 'web' ? asset.file : copiedFile;
+      const metadataFile = Platform.OS === 'web'
+        ? asset.file
+        : copiedFile ?? (asset.uri ? new File(asset.uri) : null);
       if (!metadataFile) continue;
 
       try {
@@ -2395,7 +2388,9 @@ function MusicPlayer() {
 
     const songCount = importedTracks.length;
     const importMessage =
-      source === 'folder'
+      !copyToAppStorage
+        ? `${songCount} ${songCount === 1 ? 'song was' : 'songs were'} added without copying audio into Soundroom.`
+        : source === 'folder'
         ? `${songCount} ${songCount === 1 ? 'song' : 'songs'} imported from the folder.`
         : songCount === 1
           ? '1 song added to your offline library.'
@@ -2538,6 +2533,45 @@ function MusicPlayer() {
       }
     } finally {
       setIsImporting(false);
+    }
+  };
+
+  const scanExistingMusicFolder = async () => {
+    setIsScanningDropFolder(true);
+    setNotice('');
+    try {
+      const selectedDirectory = await Directory.pickDirectoryAsync();
+      const pendingDirectories = [selectedDirectory];
+      const assets: ImportAudioAsset[] = [];
+      const knownUris = new Set(ignoredDropSources);
+      while (pendingDirectories.length > 0) {
+        const directory = pendingDirectories.pop()!;
+        for (const entry of directory.list()) {
+          if (entry instanceof Directory) {
+            pendingDirectories.push(entry);
+          } else if (isAudioFileName(entry.name) && !knownUris.has(entry.uri)) {
+            assets.push({
+              name: entry.name,
+              uri: entry.uri,
+              sourceUri: entry.uri,
+            });
+            knownUris.add(entry.uri);
+          }
+        }
+      }
+
+      await importAudioFiles(
+        assets,
+        'folder',
+        { copiedFiles: [], savedWebFiles: [], createdWebUrls: [] },
+        { copyToAppStorage: false },
+      );
+    } catch (error) {
+      if (!isPickerCancelled(error)) {
+        setNotice(`Could not scan existing music folder: ${errorMessage(error)}`);
+      }
+    } finally {
+      setIsScanningDropFolder(false);
     }
   };
 
@@ -2717,8 +2751,10 @@ function MusicPlayer() {
               revokeWebObjectUrl(track.uri);
               if (track.artworkUri) revokeWebObjectUrl(track.artworkUri);
             } else {
-              const file = new File(track.uri);
-              if (file.exists) file.delete();
+              if (track.uri !== track.sourceUri) {
+                const file = new File(track.uri);
+                if (file.exists) file.delete();
+              }
               if (track.artworkUri) {
                 const artworkFile = new File(track.artworkUri);
                 if (artworkFile.exists) artworkFile.delete();
@@ -2993,6 +3029,8 @@ function MusicPlayer() {
     selectedPlaylist?.name ??
     BROWSE_MODES.find((mode) => mode.id === browseMode)?.label ??
     'Songs';
+  const activeBrowseMode =
+    BROWSE_MODES.find((mode) => mode.id === browseMode) ?? BROWSE_MODES[0];
   const currentCount = listingPlaylists
     ? visiblePlaylists.length
     : listingGroups
@@ -3035,17 +3073,6 @@ function MusicPlayer() {
           </View>
           <Text style={styles.brandName}>SOUNDROOM</Text>
         </View>
-        <Pressable
-          accessibilityRole="switch"
-          accessibilityLabel={`Switch to ${isLightTheme ? 'dark' : 'light'} mode`}
-          accessibilityState={{ checked: isLightTheme, disabled: !themeReady }}
-          disabled={!themeReady}
-          onPress={() => setTheme(isLightTheme ? 'dark' : 'light')}
-          style={styles.themeToggle}
-        >
-          <Text style={styles.themeToggleIcon}>{isLightTheme ? '☾' : '☼'}</Text>
-          <Text style={styles.themeToggleText}>{isLightTheme ? 'LIGHT' : 'DARK'}</Text>
-        </Pressable>
       </View>
 
       <View style={styles.libraryHeading}>
@@ -3201,89 +3228,293 @@ function MusicPlayer() {
         </View>
       )}
       <BlurTargetView ref={libraryBlurTarget} style={styles.libraryBlurTarget}>
-        <FlatList
-          data={libraryItems}
-          keyExtractor={(item) =>
-            item.kind === 'group'
-              ? item.group.id
-              : item.kind === 'playlist'
-                ? item.playlist.id
-                : item.track.id
-          }
-          renderItem={({ item, index }) =>
-            item.kind === 'group'
-              ? renderGroup(item.group)
-              : item.kind === 'playlist'
-                ? renderPlaylist(item.playlist)
-                : renderTrack({ item: item.track, index })
-          }
-          ListHeaderComponent={listHeader}
-          ListEmptyComponent={
-            isLoading ? (
-              <View style={styles.emptyState}>
-                <ActivityIndicator color={COLORS.accent} />
-                <Text style={styles.emptyCaption}>Opening your library…</Text>
-              </View>
-            ) : listingPlaylists && playlists.length === 0 ? (
-              <View style={styles.emptyState}>
-                <View style={styles.emptyArtwork}>
-                  <Text style={styles.emptyNote}>♫</Text>
+        {isSettingsOpen ? (
+          <ScrollView
+            contentContainerStyle={[
+              styles.settingsContent,
+              { paddingBottom: (currentTrack ? 196 : 128) + insets.bottom },
+            ]}
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.topBar}>
+              <View style={styles.brandLockup}>
+                <View style={styles.brandIcon}>
+                  <Text style={styles.brandIconText}>♫</Text>
                 </View>
-                <Text style={styles.emptyTitle}>Make it yours.</Text>
-                <Text style={styles.emptyCaption}>
-                  Create a playlist, then add songs from your library.
-                </Text>
+                <Text style={styles.brandName}>SOUNDROOM</Text>
+              </View>
+            </View>
+            <View style={styles.settingsHeading}>
+              <Text style={styles.eyebrow}>PREFERENCES</Text>
+              <Text style={styles.sectionTitle}>Settings</Text>
+            </View>
+            {notice.length > 0 && (
+              <GlassSurface
+                light={isLightTheme}
+                contentStyle={styles.notice}
+                intensity={28}
+                style={styles.noticeGlass}
+              >
+                <Pressable onPress={() => setNotice('')} style={styles.noticeContent}>
+                  <Text style={styles.noticeText}>{notice}</Text>
+                  <Text style={styles.noticeClose}>×</Text>
+                </Pressable>
+              </GlassSurface>
+            )}
+            <GlassSurface
+              light={isLightTheme}
+              contentStyle={styles.settingsCardContent}
+              intensity={28}
+              style={styles.settingsCard}
+            >
+              <Text style={styles.eyebrow}>APPEARANCE</Text>
+              <View style={styles.settingRow}>
+                <View style={styles.settingCopy}>
+                  <Text style={styles.settingTitle}>Theme</Text>
+                  <Text style={styles.settingDescription}>Choose your preferred appearance.</Text>
+                </View>
                 <Pressable
-                  accessibilityRole="button"
-                  accessibilityState={{ disabled: !playlistsReady }}
-                  disabled={!playlistsReady}
-                  onPress={() => openPlaylistEditor()}
-                  style={styles.emptyCreateButton}
+                  accessibilityRole="switch"
+                  accessibilityLabel={`Switch to ${isLightTheme ? 'dark' : 'light'} mode`}
+                  accessibilityState={{ checked: isLightTheme, disabled: !themeReady }}
+                  disabled={!themeReady}
+                  onPress={() => setTheme(isLightTheme ? 'dark' : 'light')}
+                  style={[styles.themeToggle, !themeReady && styles.buttonDisabled]}
                 >
-                  <Text style={styles.newPlaylistButtonText}>＋ CREATE PLAYLIST</Text>
+                  <Text style={styles.themeToggleIcon}>{isLightTheme ? '☾' : '☼'}</Text>
+                  <Text style={styles.themeToggleText}>{isLightTheme ? 'LIGHT' : 'DARK'}</Text>
                 </Pressable>
               </View>
-            ) : tracks.length === 0 && !selectedPlaylist && !listingPlaylists ? (
-              <View style={styles.emptyState}>
-                <View style={styles.emptyArtwork}>
-                  <Text style={styles.emptyNote}>♫</Text>
+              <View style={styles.settingsDivider} />
+              <Text style={styles.eyebrow}>FEATURES</Text>
+              <Pressable
+                accessibilityRole="switch"
+                accessibilityLabel="AI features"
+                accessibilityState={{ checked: false, disabled: true }}
+                disabled
+                style={[styles.settingRow, styles.buttonDisabled]}
+              >
+                <View style={styles.settingCopy}>
+                  <Text style={styles.settingTitle}>AI features</Text>
+                  <Text style={styles.settingDescription}>
+                    Enable or disable AI-powered features.
+                  </Text>
                 </View>
-                <Text style={styles.emptyTitle}>A little quiet in here.</Text>
-                <Text style={styles.emptyCaption}>
-                  Add songs from your device and they’ll be ready whenever you are.
+                <View style={styles.settingSwitch}>
+                  <View style={styles.settingSwitchKnob} />
+                </View>
+              </Pressable>
+              <Text style={styles.settingsNote}>AI features are unavailable for now.</Text>
+            </GlassSurface>
+            <GlassSurface
+              light={isLightTheme}
+              contentStyle={styles.settingsCardContent}
+              intensity={28}
+              style={[styles.settingsCard, styles.settingsImportCard]}
+            >
+              <Text style={styles.eyebrow}>MUSIC LIBRARY</Text>
+              <Text style={styles.settingDescription}>
+                Add songs and folders to your library.
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Add music from files"
+                accessibilityState={{ disabled: isImporting || isLoading }}
+                disabled={isImporting || isLoading}
+                onPress={() => void importSongs()}
+                style={({ pressed }) => [
+                  styles.addMenuOption,
+                  pressed && styles.buttonPressed,
+                  (isImporting || isLoading) && styles.buttonDisabled,
+                ]}
+              >
+                <DockIcon name="files" color={COLORS.accent} />
+                <Text style={styles.addMenuOptionText}>
+                  {isImporting ? 'Adding music…' : 'Add music from files'}
                 </Text>
-              </View>
-            ) : (
-              <View style={styles.emptyState}>
-                <Text style={styles.emptyTitle}>
-                  {selectedPlaylist
-                    ? 'This playlist is empty'
-                    : listingGroups
-                      ? `No ${activeModeLabel.toLowerCase()} found`
-                      : 'No matches'}
-                </Text>
-                <Text style={styles.emptyCaption}>
-                  {selectedPlaylist
-                    ? 'Use the plus button beside a song to add it to this playlist.'
-                    : listingGroups
-                      ? 'Try another search or choose a different category.'
-                      : 'Try a different search or category.'}
-                </Text>
-              </View>
-            )
-          }
-          contentContainerStyle={[
-            styles.listContent,
-            {
-              paddingBottom:
-                (currentTrack ? 196 : 128) +
-                (isAddMenuOpen ? 176 : 0) +
-                insets.bottom,
-            },
-          ]}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-        />
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Add a music folder"
+                accessibilityState={{ disabled: isImporting || isLoading }}
+                disabled={isImporting || isLoading}
+                onPress={() => void importMusicFolder()}
+                style={({ pressed }) => [
+                  styles.addMenuOption,
+                  pressed && styles.buttonPressed,
+                  (isImporting || isLoading) && styles.buttonDisabled,
+                ]}
+              >
+                <DockIcon name="folder" color={COLORS.accent} />
+                <Text style={styles.addMenuOptionText}>Import a music folder</Text>
+              </Pressable>
+              {Platform.OS !== 'web' && (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Scan existing folder for music without copying"
+                  accessibilityState={{
+                    disabled: isImporting || isLoading || isScanningDropFolder,
+                  }}
+                  disabled={isImporting || isLoading || isScanningDropFolder}
+                  onPress={() => void scanExistingMusicFolder()}
+                  style={({ pressed }) => [
+                    styles.addMenuOption,
+                    pressed && styles.buttonPressed,
+                    (isImporting || isLoading || isScanningDropFolder) &&
+                      styles.buttonDisabled,
+                  ]}
+                >
+                  <DockIcon name="folder" color={COLORS.accent} />
+                  <View style={styles.settingCopy}>
+                    <Text style={styles.addMenuOptionText}>
+                      Scan existing folder for music
+                    </Text>
+                    <Text style={styles.settingDescription}>
+                      Add tracks without copying audio into Soundroom.
+                    </Text>
+                  </View>
+                </Pressable>
+              )}
+              {Platform.OS === 'android' && (
+                <>
+                  <View style={styles.addMenuDivider} />
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      dropFolderUri ? 'Change music folder' : 'Set music folder'
+                    }
+                    accessibilityState={{
+                      disabled: isImporting || isLoading || isScanningDropFolder,
+                    }}
+                    disabled={isImporting || isLoading || isScanningDropFolder}
+                    onPress={() => void chooseDropFolder()}
+                    style={({ pressed }) => [
+                      styles.addMenuOption,
+                      pressed && styles.buttonPressed,
+                      (isImporting || isLoading || isScanningDropFolder) &&
+                        styles.buttonDisabled,
+                    ]}
+                  >
+                    <DockIcon name="folder" color={COLORS.accent} />
+                    <Text style={styles.addMenuOptionText}>
+                      {dropFolderUri ? 'Change music folder' : 'Set music folder'}
+                    </Text>
+                  </Pressable>
+                  {dropFolderUri && (
+                    <>
+                      <Text numberOfLines={1} style={styles.addMenuStatus}>
+                        {isScanningDropFolder
+                          ? 'Scanning folder…'
+                          : `Connected · ${new Directory(dropFolderUri).name}`}
+                      </Text>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="Scan music folder now"
+                        accessibilityState={{
+                          disabled: isScanningDropFolder || isLoading,
+                        }}
+                        disabled={isScanningDropFolder || isLoading}
+                        onPress={() => setDropFolderScanRequest((request) => request + 1)}
+                        style={({ pressed }) => [
+                          styles.addMenuOption,
+                          pressed && styles.buttonPressed,
+                          (isScanningDropFolder || isLoading) &&
+                            styles.buttonDisabled,
+                        ]}
+                      >
+                        <Text style={styles.addMenuOptionText}>Scan folder now</Text>
+                      </Pressable>
+                    </>
+                  )}
+                </>
+              )}
+            </GlassSurface>
+          </ScrollView>
+        ) : (
+          <FlatList
+            data={libraryItems}
+            keyExtractor={(item) =>
+              item.kind === 'group'
+                ? item.group.id
+                : item.kind === 'playlist'
+                  ? item.playlist.id
+                  : item.track.id
+            }
+            renderItem={({ item, index }) =>
+              item.kind === 'group'
+                ? renderGroup(item.group)
+                : item.kind === 'playlist'
+                  ? renderPlaylist(item.playlist)
+                  : renderTrack({ item: item.track, index })
+            }
+            ListHeaderComponent={listHeader}
+            ListEmptyComponent={
+              isLoading ? (
+                <View style={styles.emptyState}>
+                  <ActivityIndicator color={COLORS.accent} />
+                  <Text style={styles.emptyCaption}>Opening your library…</Text>
+                </View>
+              ) : listingPlaylists && playlists.length === 0 ? (
+                <View style={styles.emptyState}>
+                  <View style={styles.emptyArtwork}>
+                    <Text style={styles.emptyNote}>♫</Text>
+                  </View>
+                  <Text style={styles.emptyTitle}>Make it yours.</Text>
+                  <Text style={styles.emptyCaption}>
+                    Create a playlist, then add songs from your library.
+                  </Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: !playlistsReady }}
+                    disabled={!playlistsReady}
+                    onPress={() => openPlaylistEditor()}
+                    style={styles.emptyCreateButton}
+                  >
+                    <Text style={styles.newPlaylistButtonText}>＋ CREATE PLAYLIST</Text>
+                  </Pressable>
+                </View>
+              ) : tracks.length === 0 && !selectedPlaylist && !listingPlaylists ? (
+                <View style={styles.emptyState}>
+                  <View style={styles.emptyArtwork}>
+                    <Text style={styles.emptyNote}>♫</Text>
+                  </View>
+                  <Text style={styles.emptyTitle}>A little quiet in here.</Text>
+                  <Text style={styles.emptyCaption}>
+                    Add songs from your device and they’ll be ready whenever you are.
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.emptyState}>
+                  <Text style={styles.emptyTitle}>
+                    {selectedPlaylist
+                      ? 'This playlist is empty'
+                      : listingGroups
+                        ? `No ${activeModeLabel.toLowerCase()} found`
+                        : 'No matches'}
+                  </Text>
+                  <Text style={styles.emptyCaption}>
+                    {selectedPlaylist
+                      ? 'Use the plus button beside a song to add it to this playlist.'
+                      : listingGroups
+                        ? 'Try another search or choose a different category.'
+                        : 'Try a different search or category.'}
+                  </Text>
+                </View>
+              )
+            }
+            contentContainerStyle={[
+              styles.listContent,
+              {
+                paddingBottom:
+                  (currentTrack ? 196 : 128) +
+                  (isBrowseMenuOpen ? 260 : 0) +
+                  insets.bottom,
+              },
+            ]}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          />
+        )}
       </BlurTargetView>
 
       <View style={styles.bottomDock}>
@@ -3334,107 +3565,49 @@ function MusicPlayer() {
               </Pressable>
             </GlassSurface>
           )}
-          {isAddMenuOpen && (
+          {isBrowseMenuOpen && (
             <GlassSurface
               blurTarget={libraryBlurTarget}
               light={isLightTheme}
-              contentStyle={styles.addMenuContent}
+              contentStyle={styles.browseMenuContent}
               intensity={78}
-              style={styles.addMenu}
+              style={styles.browseMenu}
             >
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Add music from files"
-                accessibilityState={{ disabled: isImporting || isLoading }}
-                disabled={isImporting || isLoading}
-                onPress={() => {
-                  setIsAddMenuOpen(false);
-                  void importSongs();
-                }}
-                style={({ pressed }) => [
-                  styles.addMenuOption,
-                  pressed && styles.buttonPressed,
-                  (isImporting || isLoading) && styles.buttonDisabled,
-                ]}
-              >
-                <DockIcon name="files" color={COLORS.accent} />
-                <Text style={styles.addMenuOptionText}>
-                  {isImporting ? 'Adding music…' : 'Add music from files'}
-                </Text>
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Add a music folder"
-                accessibilityState={{ disabled: isImporting || isLoading }}
-                disabled={isImporting || isLoading}
-                onPress={() => {
-                  setIsAddMenuOpen(false);
-                  void importMusicFolder();
-                }}
-                style={({ pressed }) => [
-                  styles.addMenuOption,
-                  pressed && styles.buttonPressed,
-                  (isImporting || isLoading) && styles.buttonDisabled,
-                ]}
-              >
-                <DockIcon name="folder" color={COLORS.accent} />
-                <Text style={styles.addMenuOptionText}>Import a music folder</Text>
-              </Pressable>
-              {Platform.OS === 'android' && (
-                <>
-                  <View style={styles.addMenuDivider} />
+              {BROWSE_MENU_MODES.map((mode) => {
+                const selected = browseMode === mode.id;
+                return (
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel={
-                      dropFolderUri ? 'Change music folder' : 'Set music folder'
-                    }
-                    disabled={isImporting || isLoading || isScanningDropFolder}
+                    accessibilityLabel={mode.label}
+                    accessibilityState={{ selected }}
+                    key={mode.id}
                     onPress={() => {
-                      setIsAddMenuOpen(false);
-                      void chooseDropFolder();
+                      setBrowseMode(mode.id);
+                      setSelectedGroup(null);
+                      setSelectedPlaylistId(null);
+                      setIsBrowseMenuOpen(false);
+                      setIsSettingsOpen(false);
                     }}
-                    style={({ pressed }) => [
+                    style={[
                       styles.addMenuOption,
-                      pressed && styles.buttonPressed,
-                      (isImporting || isLoading || isScanningDropFolder) &&
-                        styles.buttonDisabled,
+                      selected && styles.browseTabSelected,
                     ]}
                   >
-                    <DockIcon name="folder" color={COLORS.accent} />
-                    <Text style={styles.addMenuOptionText}>
-                      {dropFolderUri ? 'Change music folder' : 'Set music folder'}
+                    <DockIcon
+                      name={mode.icon}
+                      color={selected ? COLORS.accent : COLORS.secondaryText}
+                    />
+                    <Text
+                      style={[
+                        styles.addMenuOptionText,
+                        selected && styles.browseTabTextSelected,
+                      ]}
+                    >
+                      {mode.label}
                     </Text>
                   </Pressable>
-                  {dropFolderUri && (
-                    <>
-                      <Text numberOfLines={1} style={styles.addMenuStatus}>
-                        {isScanningDropFolder
-                          ? 'Scanning folder…'
-                          : `Connected · ${new Directory(dropFolderUri).name}`}
-                      </Text>
-                      <Pressable
-                        accessibilityRole="button"
-                        accessibilityLabel="Scan music folder now"
-                        accessibilityState={{
-                          disabled: isScanningDropFolder || isLoading,
-                        }}
-                        disabled={isScanningDropFolder || isLoading}
-                        onPress={() => {
-                          setDropFolderScanRequest((request) => request + 1);
-                        }}
-                        style={({ pressed }) => [
-                          styles.addMenuOption,
-                          pressed && styles.buttonPressed,
-                          (isScanningDropFolder || isLoading) &&
-                            styles.buttonDisabled,
-                        ]}
-                      >
-                        <Text style={styles.addMenuOptionText}>Scan folder now</Text>
-                      </Pressable>
-                    </>
-                  )}
-                </>
-              )}
+                );
+              })}
             </GlassSurface>
           )}
           <GlassSurface
@@ -3444,52 +3617,91 @@ function MusicPlayer() {
             intensity={78}
             style={styles.navigationBar}
           >
-            {BROWSE_MODES.map((mode) => {
-              const selected = browseMode === mode.id;
-              return (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={mode.label}
-                  accessibilityState={{ selected }}
-                  key={mode.id}
-                  onPress={() => {
-                    setIsAddMenuOpen(false);
-                    setBrowseMode(mode.id);
-                    setSelectedGroup(null);
-                    setSelectedPlaylistId(null);
-                  }}
-                  style={[styles.browseTab, selected && styles.browseTabSelected]}
-                >
-                  <DockIcon
-                    name={mode.icon}
-                    color={selected ? COLORS.accent : COLORS.secondaryText}
-                  />
-                  <Text
-                    numberOfLines={1}
-                    style={[styles.browseTabText, selected && styles.browseTabTextSelected]}
-                  >
-                    {mode.label}
-                  </Text>
-                </Pressable>
-              );
-            })}
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={
-                isAddMenuOpen ? 'Close add music menu' : 'Add music'
-              }
-              accessibilityState={{ expanded: isAddMenuOpen }}
-              onPress={() => setIsAddMenuOpen((isOpen) => !isOpen)}
+              accessibilityLabel={`Browse categories, current category ${activeBrowseMode.label}`}
+              accessibilityState={{ expanded: isBrowseMenuOpen }}
+              onPress={() => {
+                setIsSettingsOpen(false);
+                setIsBrowseMenuOpen((isOpen) => !isOpen);
+              }}
               style={[
                 styles.browseTab,
-                styles.addMenuTab,
-                isAddMenuOpen && styles.browseTabSelected,
+                isBrowseMenuOpen && styles.browseTabSelected,
               ]}
             >
               <DockIcon
-                name="add"
-                color={isAddMenuOpen ? COLORS.accent : COLORS.secondaryText}
+                name={activeBrowseMode.icon}
+                color={isBrowseMenuOpen ? COLORS.accent : COLORS.secondaryText}
               />
+              <Text
+                numberOfLines={1}
+                style={[
+                  styles.browseTabText,
+                  isBrowseMenuOpen && styles.browseTabTextSelected,
+                ]}
+              >
+                Browse
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Playlists"
+              accessibilityState={{ selected: browseMode === 'playlists' }}
+              onPress={() => {
+                setIsBrowseMenuOpen(false);
+                setIsSettingsOpen(false);
+                setBrowseMode('playlists');
+                setSelectedGroup(null);
+                setSelectedPlaylistId(null);
+              }}
+              style={[
+                styles.browseTab,
+                browseMode === 'playlists' && styles.browseTabSelected,
+              ]}
+            >
+              <DockIcon
+                name="playlists"
+                color={
+                  browseMode === 'playlists' ? COLORS.accent : COLORS.secondaryText
+                }
+              />
+              <Text
+                numberOfLines={1}
+                style={[
+                  styles.browseTabText,
+                  browseMode === 'playlists' && styles.browseTabTextSelected,
+                ]}
+              >
+                Playlists
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Settings"
+              accessibilityState={{ selected: isSettingsOpen }}
+              onPress={() => {
+                setIsBrowseMenuOpen(false);
+                setIsSettingsOpen(true);
+              }}
+              style={[
+                styles.browseTab,
+                isSettingsOpen && styles.browseTabSelected,
+              ]}
+            >
+              <DockIcon
+                name="settings"
+                color={isSettingsOpen ? COLORS.accent : COLORS.secondaryText}
+              />
+              <Text
+                numberOfLines={1}
+                style={[
+                  styles.browseTabText,
+                  isSettingsOpen && styles.browseTabTextSelected,
+                ]}
+              >
+                Settings
+              </Text>
             </Pressable>
           </GlassSurface>
         </View>
@@ -4109,6 +4321,9 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
   listContent: {
     paddingHorizontal: 22,
   },
+  settingsContent: {
+    paddingHorizontal: 22,
+  },
   audioHost: {
     position: 'absolute',
     top: 0,
@@ -4231,6 +4446,64 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     fontWeight: '800',
     letterSpacing: 0.8,
   },
+  settingsHeading: {
+    marginTop: 20,
+    marginBottom: 17,
+  },
+  settingsCard: {
+    borderRadius: 22,
+  },
+  settingsCardContent: {
+    padding: 18,
+  },
+  settingRow: {
+    minHeight: 62,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingVertical: 10,
+  },
+  settingCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 5,
+  },
+  settingTitle: {
+    color: COLORS.primaryText,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  settingDescription: {
+    color: COLORS.secondaryText,
+    fontSize: 10,
+    lineHeight: 15,
+  },
+  settingsDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: COLORS.controlBorder,
+    marginVertical: 13,
+  },
+  settingSwitch: {
+    width: 44,
+    height: 26,
+    padding: 3,
+    justifyContent: 'center',
+    borderRadius: 13,
+    backgroundColor: COLORS.controlBorder,
+  },
+  settingSwitchKnob: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: COLORS.primaryText,
+  },
+  settingsNote: {
+    color: COLORS.muted,
+    fontSize: 9,
+    lineHeight: 14,
+    marginTop: -4,
+  },
   brandLockup: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -4280,12 +4553,15 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     alignItems: 'center',
     padding: 4,
   },
-  addMenu: {
+  browseMenu: {
     borderRadius: 19,
   },
-  addMenuContent: {
+  browseMenuContent: {
     padding: 8,
     gap: 3,
+  },
+  settingsImportCard: {
+    marginTop: 14,
   },
   addMenuOption: {
     minHeight: 44,
@@ -4323,10 +4599,6 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
   },
   browseTabSelected: {
     backgroundColor: COLORS.selectedSurface,
-  },
-  addMenuTab: {
-    flex: 0,
-    width: 42,
   },
   browseTabText: {
     color: COLORS.secondaryText,
