@@ -1395,6 +1395,7 @@ function MusicPlayer() {
   const [isShuffling, setIsShuffling] = useState(false);
   const [isRepeating, setIsRepeating] = useState(false);
   const [notice, setNotice] = useState('');
+  const tracksRef = useRef<Track[]>([]);
   const notificationPermissionRequested = useRef(false);
   const webObjectUrls = useRef(new Set<string>());
   const notificationActions = useRef({
@@ -1405,6 +1406,10 @@ function MusicPlayer() {
     seek: (_seconds: number) => {},
     stop: () => {},
   });
+
+  useEffect(() => {
+    tracksRef.current = tracks;
+  }, [tracks]);
 
   useEffect(() => {
     if (Platform.OS === 'web') return;
@@ -1968,16 +1973,20 @@ function MusicPlayer() {
   };
 
   const openPlayer = () => {
-    setIsPlayerOpen(true);
-    if (Platform.OS === 'web') return;
+    if (Platform.OS === 'web') {
+      setIsPlayerOpen(true);
+      return;
+    }
 
     const requestVersion = volumeChangeVersion.current;
     void VolumeManager.getVolume()
       .then(({ volume }) => {
         if (volumeChangeVersion.current === requestVersion) setPlayerVolume(volume);
+        setIsPlayerOpen(true);
       })
       .catch((error: unknown) => {
         setNotice(`Could not read system media volume: ${errorMessage(error)}`);
+        setIsPlayerOpen(true);
       });
   };
 
@@ -2207,9 +2216,10 @@ function MusicPlayer() {
       savedWebFiles: string[];
       createdWebUrls: string[];
     },
+    { showNotice = true }: { showNotice?: boolean } = {},
   ) => {
     const knownSourceUris = new Set(
-      tracks.flatMap((track) => [track.sourceUri, track.uri].filter(Boolean) as string[]),
+      tracksRef.current.flatMap((track) => [track.sourceUri, track.uri].filter(Boolean) as string[]),
     );
     const audioAssets = assets.filter(
       (asset) =>
@@ -2217,12 +2227,14 @@ function MusicPlayer() {
         (!asset.sourceUri || !knownSourceUris.has(asset.sourceUri)),
     );
     if (audioAssets.length === 0) {
-      setNotice(
-        source === 'folder'
-          ? 'No supported audio files were found in that folder.'
-          : 'No supported audio files were selected.',
-      );
-      return;
+      if (showNotice) {
+        setNotice(
+          source === 'folder'
+            ? 'No supported audio files were found in that folder.'
+            : 'No supported audio files were selected.',
+        );
+      }
+      return { importedCount: 0, failedCount: 0 };
     }
 
     const musicDirectory =
@@ -2231,82 +2243,126 @@ function MusicPlayer() {
 
     const importedTracks: Track[] = [];
     let metadataReadFailures = 0;
-    for (const asset of audioAssets) {
+    let importFailures = 0;
+    let firstImportError = '';
+    let metadataPersistenceError = '';
+    for (const [assetIndex, asset] of audioAssets.entries()) {
       const fallback = trackDetails(asset.name);
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const addedAt = Date.now() + importedTracks.length;
-      if (Platform.OS === 'web') {
-        if (!asset.file) {
-          throw new Error(`The browser could not access ${asset.name}. Please choose it again.`);
-        }
-        await saveWebAudio(id, asset.file);
-        cleanup.savedWebFiles.push(id);
-        const uri = makeWebObjectUrl(asset.file);
-        cleanup.createdWebUrls.push(uri);
-
-        let metadata = fallbackTrackMetadata(asset.file, fallback);
-        try {
-          metadata = await readTrackMetadata(
-            asset.file,
-            fallback,
+      const addedAt = Date.now() + assetIndex;
+      let savedWebAudioId: string | null = null;
+      let createdWebUrl: string | null = null;
+      let copiedFile: File | null = null;
+      let importedTrack: Track;
+      try {
+        if (Platform.OS === 'web') {
+          if (!asset.file) {
+            throw new Error(`The browser could not access ${asset.name}. Please choose it again.`);
+          }
+          await saveWebAudio(id, asset.file);
+          savedWebAudioId = id;
+          const uri = makeWebObjectUrl(asset.file);
+          createdWebUrl = uri;
+          importedTrack = {
             id,
-            makeWebObjectUrl,
-            cleanup.copiedFiles,
-          );
-        } catch (error) {
-          metadataReadFailures += 1;
-          console.warn(
-            `Could not read audio tags for ${asset.name}: ${errorMessage(error)}`,
-          );
+            uri,
+            fileName: asset.name,
+            ...fallbackTrackMetadata(asset.file, fallback),
+            addedAt,
+          };
+        } else {
+          if (!asset.uri) {
+            throw new Error(`The selected audio file ${asset.name} is not available.`);
+          }
+          const safeName = asset.name.replace(/[\\/:*?"<>|]/g, '_') || 'audio';
+          const destination = new File(musicDirectory!, `${id}-${safeName}`);
+          copiedFile = destination;
+          await new File(asset.uri).copy(destination);
+          importedTrack = {
+            id,
+            uri: destination.uri,
+            fileName: asset.name,
+            sourceUri: asset.sourceUri,
+            ...fallbackTrackMetadata(destination, fallback),
+            addedAt,
+          };
         }
 
-        importedTracks.push({
-          id,
-          uri,
-          fileName: asset.name,
-          ...metadata,
-          addedAt,
-        });
+        const updatedTracks = [...tracksRef.current, importedTrack];
+        await saveLibrary(updatedTracks);
+        tracksRef.current = updatedTracks;
+        setTracks(updatedTracks);
+        importedTracks.push(importedTrack);
+        if (copiedFile) cleanup.copiedFiles.push(copiedFile);
+        if (savedWebAudioId) cleanup.savedWebFiles.push(savedWebAudioId);
+        if (createdWebUrl) cleanup.createdWebUrls.push(createdWebUrl);
+      } catch (error) {
+        importFailures += 1;
+        firstImportError ||= `${asset.name}: ${errorMessage(error)}`;
+        console.warn(`Could not add ${asset.name}: ${errorMessage(error)}`);
+        if (createdWebUrl) revokeWebObjectUrl(createdWebUrl);
+        if (savedWebAudioId) {
+          try {
+            await removeWebAudio(savedWebAudioId);
+          } catch (cleanupError) {
+            console.warn(
+              `Could not clean up ${asset.name}: ${errorMessage(cleanupError)}`,
+            );
+          }
+        }
+        if (copiedFile?.exists) {
+          try {
+            copiedFile.delete();
+          } catch (cleanupError) {
+            console.warn(
+              `Could not clean up ${asset.name}: ${errorMessage(cleanupError)}`,
+            );
+          }
+        }
         continue;
       }
 
-      if (!asset.uri) {
-        throw new Error(`The selected audio file ${asset.name} is not available.`);
-      }
-      const safeName = asset.name.replace(/[\\/:*?"<>|]/g, '_') || 'audio';
-      const destination = new File(musicDirectory!, `${id}-${safeName}`);
-      await new File(asset.uri).copy(destination);
-      cleanup.copiedFiles.push(destination);
+      const metadataFile =
+        Platform.OS === 'web' ? asset.file : copiedFile;
+      if (!metadataFile) continue;
 
-      let metadata = fallbackTrackMetadata(destination, fallback);
       try {
-        metadata = await readTrackMetadata(
-          destination,
+        const metadata = await readTrackMetadata(
+          metadataFile,
           fallback,
           id,
           makeWebObjectUrl,
           cleanup.copiedFiles,
         );
+        const enrichedTrack = { ...importedTrack, ...metadata };
+        const updatedTracks = tracksRef.current.map((track) =>
+          track.id === id ? enrichedTrack : track,
+        );
+        tracksRef.current = updatedTracks;
+        setTracks(updatedTracks);
+        const importedIndex = importedTracks.findIndex((track) => track.id === id);
+        if (importedIndex >= 0) importedTracks[importedIndex] = enrichedTrack;
       } catch (error) {
         metadataReadFailures += 1;
         console.warn(
           `Could not read audio tags for ${asset.name}: ${errorMessage(error)}`,
         );
       }
-
-      importedTracks.push({
-        id,
-        uri: destination.uri,
-        fileName: asset.name,
-        sourceUri: asset.sourceUri,
-        ...metadata,
-        addedAt,
-      });
     }
 
-    const updatedTracks = [...tracks, ...importedTracks];
-    await saveLibrary(updatedTracks);
-    setTracks(updatedTracks);
+    if (importedTracks.length > 0) {
+      try {
+        await saveLibrary(tracksRef.current);
+      } catch (error) {
+        metadataPersistenceError = errorMessage(error);
+      }
+    }
+
+    if (importedTracks.length === 0 && importFailures > 0) {
+      if (showNotice) setNotice(`Could not add songs: ${firstImportError}`);
+      return { importedCount: 0, failedCount: importFailures };
+    }
+
     const songCount = importedTracks.length;
     const importMessage =
       source === 'folder'
@@ -2314,14 +2370,30 @@ function MusicPlayer() {
         : songCount === 1
           ? '1 song added to your offline library.'
           : `${songCount} songs added to your offline library.`;
-    setNotice(
-      metadataReadFailures > 0
-        ? `${importMessage} Tags could not be read for ${metadataReadFailures} ${
-            metadataReadFailures === 1 ? 'file' : 'files'
-          }; filename details were used where possible.`
-        : importMessage,
-    );
-  }, [makeWebObjectUrl, saveLibrary, tracks]);
+    if (showNotice) {
+      setNotice(
+        [
+          importMessage,
+          importFailures > 0
+            ? `${importFailures} ${importFailures === 1 ? 'file could not' : 'files could'} not be added${
+                firstImportError ? ` (${firstImportError})` : ''
+              }.`
+            : '',
+          metadataPersistenceError
+            ? `Metadata changes could not be saved: ${metadataPersistenceError}`
+            : '',
+          metadataReadFailures > 0
+            ? `Tags could not be read for ${metadataReadFailures} ${
+                metadataReadFailures === 1 ? 'file' : 'files'
+              }; filename details were used where possible.`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' '),
+      );
+    }
+    return { importedCount: importedTracks.length, failedCount: importFailures };
+  }, [makeWebObjectUrl, saveLibrary]);
 
   const importSongs = async () => {
     setIsImporting(true);
@@ -2467,8 +2539,17 @@ function MusicPlayer() {
         if (!root) return;
 
         const pendingDirectories = [root];
-        const assets: ImportAudioAsset[] = [];
+        const knownSourceUris = new Set(
+          tracksRef.current.flatMap(
+            (track) => [track.sourceUri, track.uri].filter(Boolean) as string[],
+          ),
+        );
+        const ignoredSources = new Set(ignoredDropSources);
+        let importedCount = 0;
+        let failedCount = 0;
+        let firstImportError = '';
         while (pendingDirectories.length > 0) {
+          if (!active) return;
           const directory = pendingDirectories.pop()!;
           for (const entry of directory.list()) {
             if (entry instanceof Directory) {
@@ -2481,40 +2562,61 @@ function MusicPlayer() {
               }
               pendingDirectories.push(entry);
             } else if (isAudioFileName(entry.name)) {
-              assets.push({
-                name: entry.name,
-                uri: entry.uri,
-                sourceUri: entry.uri,
-              });
+              if (
+                knownSourceUris.has(entry.uri) ||
+                ignoredSources.has(entry.uri)
+              ) {
+                continue;
+              }
+              knownSourceUris.add(entry.uri);
+
+              const cleanup = {
+                copiedFiles: [] as File[],
+                savedWebFiles: [] as string[],
+                createdWebUrls: [] as string[],
+              };
+              try {
+                const result = await importAudioFiles(
+                  [{
+                    name: entry.name,
+                    uri: entry.uri,
+                    sourceUri: entry.uri,
+                  }],
+                  'folder',
+                  cleanup,
+                  { showNotice: false },
+                );
+                importedCount += result.importedCount;
+                failedCount += result.failedCount;
+              } catch (error) {
+                failedCount += 1;
+                firstImportError ||= `${entry.name}: ${errorMessage(error)}`;
+                for (const file of cleanup.copiedFiles) {
+                  if (file.exists) file.delete();
+                }
+                if (!active) return;
+              }
             }
           }
         }
 
-        const knownSourceUris = new Set(
-          tracks.flatMap((track) => [track.sourceUri, track.uri].filter(Boolean) as string[]),
-        );
-        const ignoredSources = new Set(ignoredDropSources);
-        const newAssets = assets.filter(
-          (asset) =>
-            !knownSourceUris.has(asset.sourceUri ?? '') &&
-            !ignoredSources.has(asset.sourceUri ?? ''),
-        );
-        if (newAssets.length === 0) return;
-
-        const cleanup = {
-          copiedFiles: [] as File[],
-          savedWebFiles: [] as string[],
-          createdWebUrls: [] as string[],
-        };
-        try {
-          await importAudioFiles(newAssets, 'folder', cleanup);
-        } catch (error) {
-          for (const file of cleanup.copiedFiles) {
-            if (file.exists) file.delete();
-          }
-          if (active) {
-            setNotice(`Could not process music drop folder: ${errorMessage(error)}`);
-          }
+        if (active && (importedCount > 0 || failedCount > 0)) {
+          setNotice(
+            [
+              importedCount > 0
+                ? `${importedCount} new ${
+                    importedCount === 1 ? 'song was' : 'songs were'
+                  } added from the connected folder.`
+                : '',
+              failedCount > 0
+                ? `${failedCount} ${
+                    failedCount === 1 ? 'file could' : 'files could'
+                  } not be added${firstImportError ? ` (${firstImportError})` : ''}.`
+                : '',
+            ]
+              .filter(Boolean)
+              .join(' '),
+          );
         }
       } catch (error) {
         if (active) {
@@ -2536,7 +2638,6 @@ function MusicPlayer() {
     ignoredDropSources,
     importAudioFiles,
     isLoading,
-    tracks,
   ]);
 
   const removeTrack = (track: Track) => {
