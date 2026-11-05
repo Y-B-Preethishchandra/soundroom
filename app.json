@@ -37,6 +37,7 @@
     },
     "plugins": [
       "expo-background-task",
+      "./plugins/with-workmanager-proguard",
       [
         "react-native-audio-api",
         {
