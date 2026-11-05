@@ -354,6 +354,7 @@ type LibraryGroup = {
   title: string;
   subtitle: string;
   count: number;
+  tracks: Track[];
   newestAddedAt: number;
   oldestAddedAt: number;
   metadata: Record<string, string>;
@@ -777,6 +778,10 @@ const SORT_OPTIONS: { id: SortMode; label: string }[] = [
   { id: 'newest', label: 'Recently added' },
   { id: 'oldest', label: 'Oldest added' },
 ];
+const METADATA_COLLATOR = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: 'base',
+});
 
 function isTrack(value: unknown): value is Track {
   if (typeof value !== 'object' || value === null) return false;
@@ -1130,10 +1135,7 @@ function groupSortValue(
 }
 
 function compareMetadataValues(first: string, second: string) {
-  return first.localeCompare(second, undefined, {
-    numeric: true,
-    sensitivity: 'base',
-  });
+  return METADATA_COLLATOR.compare(first, second);
 }
 
 function shuffleTracks(tracksToShuffle: Track[]) {
@@ -1570,7 +1572,12 @@ function MusicPlayer() {
     );
   }, [search, tracks]);
 
-  const groupedLibrary = useMemo(() => {
+  const tracksById = useMemo(
+    () => new Map(tracks.map((track) => [track.id, track])),
+    [tracks],
+  );
+
+  const unsortedGroups = useMemo(() => {
     if (browseMode === 'songs' || browseMode === 'playlists') return [];
 
     const groups = new Map<string, LibraryGroup>();
@@ -1579,6 +1586,7 @@ function MusicPlayer() {
       const existing = groups.get(details.id);
       if (existing) {
         existing.count += 1;
+        existing.tracks.push(track);
         existing.newestAddedAt = Math.max(existing.newestAddedAt, track.addedAt);
         existing.oldestAddedAt = Math.min(existing.oldestAddedAt, track.addedAt);
         if (!existing.artworkUri && track.artworkUri) existing.artworkUri = track.artworkUri;
@@ -1586,6 +1594,7 @@ function MusicPlayer() {
         groups.set(details.id, {
           ...details,
           count: 1,
+          tracks: [track],
           newestAddedAt: track.addedAt,
           oldestAddedAt: track.addedAt,
           metadata: track.metadata ?? {},
@@ -1594,15 +1603,31 @@ function MusicPlayer() {
       }
     }
 
-    return [...groups.values()].sort((first, second) => {
-      if (sortMode === 'newest') return second.newestAddedAt - first.newestAddedAt;
-      if (sortMode === 'oldest') return first.oldestAddedAt - second.oldestAddedAt;
-      return compareMetadataValues(
-        groupSortValue(first, sortMode, browseMode),
-        groupSortValue(second, sortMode, browseMode),
-      );
-    });
-  }, [browseMode, sortMode, visibleTracks]);
+    return [...groups.values()];
+  }, [browseMode, visibleTracks]);
+
+  const groupedLibrary = useMemo(
+    () =>
+      unsortedGroups
+        .map((group) => ({
+          group,
+          sortValue:
+            sortMode === 'newest' || sortMode === 'oldest'
+              ? ''
+              : groupSortValue(group, sortMode, browseMode),
+        }))
+        .sort((first, second) => {
+          if (sortMode === 'newest') {
+            return second.group.newestAddedAt - first.group.newestAddedAt;
+          }
+          if (sortMode === 'oldest') {
+            return first.group.oldestAddedAt - second.group.oldestAddedAt;
+          }
+          return compareMetadataValues(first.sortValue, second.sortValue);
+        })
+        .map(({ group }) => group),
+    [browseMode, sortMode, unsortedGroups],
+  );
 
   const listingGroups =
     browseMode !== 'songs' && browseMode !== 'playlists' && selectedGroup === null;
@@ -1610,7 +1635,9 @@ function MusicPlayer() {
     () => {
       if (selectedPlaylistId !== null) {
         const playlist = playlists.find((item) => item.id === selectedPlaylistId);
-        return visibleTracks.filter((track) => playlist?.trackIds.includes(track.id));
+        if (!playlist) return [];
+        const playlistTrackIds = new Set(playlist.trackIds);
+        return visibleTracks.filter((track) => playlistTrackIds.has(track.id));
       }
       if (selectedGroup && browseMode !== 'songs' && browseMode !== 'playlists') {
         const collectionMode: CollectionMode = browseMode;
@@ -1623,17 +1650,20 @@ function MusicPlayer() {
     [browseMode, playlists, selectedGroup, selectedPlaylistId, visibleTracks],
   );
   const sortedTracks = useMemo(() => {
-    const sorted = [...tracksForList];
-    sorted.sort((first, second) => {
-      if (sortMode === 'newest') return second.addedAt - first.addedAt;
-      if (sortMode === 'oldest') return first.addedAt - second.addedAt;
-      const primary = compareMetadataValues(
-        trackSortValue(first, sortMode),
-        trackSortValue(second, sortMode),
-      );
-      return primary || compareMetadataValues(first.title, second.title);
-    });
-    return sorted;
+    const newestFirst = sortMode === 'newest';
+    const oldestFirst = sortMode === 'oldest';
+    return tracksForList
+      .map((track) => ({
+        track,
+        sortValue: newestFirst || oldestFirst ? '' : trackSortValue(track, sortMode),
+      }))
+      .sort((first, second) => {
+        if (newestFirst) return second.track.addedAt - first.track.addedAt;
+        if (oldestFirst) return first.track.addedAt - second.track.addedAt;
+        const primary = compareMetadataValues(first.sortValue, second.sortValue);
+        return primary || compareMetadataValues(first.track.title, second.track.title);
+      })
+      .map(({ track }) => track);
   }, [sortMode, tracksForList]);
   const selectedPlaylist = playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? null;
   const listingPlaylists = browseMode === 'playlists' && selectedPlaylist === null;
@@ -2872,13 +2902,6 @@ function MusicPlayer() {
   };
 
   const renderGroup = (group: LibraryGroup) => {
-    const groupTracks = visibleTracks.filter(
-      (track) =>
-        browseMode !== 'songs' &&
-        browseMode !== 'playlists' &&
-        groupDetails(track, browseMode).id === group.id,
-    );
-
     return (
       <GlassSurface
         light={isLightTheme}
@@ -2904,7 +2927,7 @@ function MusicPlayer() {
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={`Add ${group.title} songs to playback queue`}
-          onPress={() => addTracksToQueue(groupTracks, group.title)}
+          onPress={() => addTracksToQueue(group.tracks, group.title)}
           hitSlop={8}
           style={styles.groupQueueButton}
         >
@@ -2917,7 +2940,7 @@ function MusicPlayer() {
 
   const renderPlaylist = (playlist: Playlist) => {
     const playlistTracks = playlist.trackIds
-      .map((id) => tracks.find((track) => track.id === id))
+      .map((id) => tracksById.get(id))
       .filter((track): track is Track => track !== undefined);
     return (
       <GlassSurface light={isLightTheme} contentStyle={styles.trackRow} intensity={25} style={styles.trackCard}>
@@ -3104,7 +3127,12 @@ function MusicPlayer() {
                   accessibilityState={{ selected }}
                   key={option.id}
                   onPress={() => setSortMode(option.id)}
-                  style={[styles.sortChip, selected && styles.sortChipSelected]}
+                  hitSlop={4}
+                  style={({ pressed }) => [
+                    styles.sortChip,
+                    selected && styles.sortChipSelected,
+                    pressed && styles.sortChipPressed,
+                  ]}
                 >
                   <Text style={[styles.sortChipText, selected && styles.sortChipTextSelected]}>
                     {option.label}
@@ -4413,6 +4441,10 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
   sortChipSelected: {
     backgroundColor: COLORS.selectedSurface,
     borderColor: COLORS.selectedBorder,
+  },
+  sortChipPressed: {
+    opacity: 0.72,
+    transform: [{ scale: 0.96 }],
   },
   sortChipText: {
     color: COLORS.secondaryText,
