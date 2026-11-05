@@ -33,6 +33,7 @@ import {
   FlatList,
   Image,
   Keyboard,
+  LayoutAnimation,
   Modal,
   PanResponder,
   Pressable,
@@ -41,6 +42,7 @@ import {
   Text,
   TextInput,
   Platform,
+  UIManager,
   useWindowDimensions,
   View,
 } from 'react-native';
@@ -1465,6 +1467,12 @@ function MusicPlayer() {
   });
 
   useEffect(() => {
+    if (Platform.OS === 'android') {
+      UIManager.setLayoutAnimationEnabledExperimental?.(true);
+    }
+  }, []);
+
+  useEffect(() => {
     tracksRef.current = tracks;
   }, [tracks]);
 
@@ -2160,17 +2168,22 @@ function MusicPlayer() {
   };
 
   const moveQueueTrack = useCallback((trackId: string, targetIndex: number) => {
-    setPlaybackQueue((queue) => {
-      const sourceIndex = queue.findIndex((track) => track.id === trackId);
-      if (sourceIndex < 0 || queue.length < 2) return queue;
-      const boundedTarget = Math.max(0, Math.min(targetIndex, queue.length - 1));
-      if (sourceIndex === boundedTarget) return queue;
-      const reordered = [...queue];
-      const [movedTrack] = reordered.splice(sourceIndex, 1);
-      reordered.splice(boundedTarget, 0, movedTrack);
-      return reordered;
+    const sourceIndex = playbackQueue.findIndex((track) => track.id === trackId);
+    if (sourceIndex < 0 || playbackQueue.length < 2) return;
+    const boundedTarget = Math.max(0, Math.min(targetIndex, playbackQueue.length - 1));
+    if (sourceIndex === boundedTarget) return;
+    const reordered = [...playbackQueue];
+    const [movedTrack] = reordered.splice(sourceIndex, 1);
+    reordered.splice(boundedTarget, 0, movedTrack);
+    LayoutAnimation.configureNext({
+      duration: 240,
+      update: {
+        type: LayoutAnimation.Types.spring,
+        springDamping: 0.8,
+      },
     });
-  }, []);
+    setPlaybackQueue(reordered);
+  }, [playbackQueue]);
 
   const removeQueueTrack = (track: Track, index: number) => {
     const updatedQueue = playbackQueue.filter((item) => item.id !== track.id);
@@ -2237,10 +2250,13 @@ function MusicPlayer() {
   const moveTrack = (direction: 1 | -1) => {
     if (playbackQueue.length === 0) return;
     const currentIndex = playbackQueue.findIndex((track) => track.id === currentTrack?.id);
-    const nextIndex =
-      currentIndex < 0
-        ? 0
-        : (currentIndex + direction + playbackQueue.length) % playbackQueue.length;
+    if (currentIndex < 0) {
+      if (direction < 0) return;
+      playTrack(playbackQueue[0]);
+      return;
+    }
+    const nextIndex = currentIndex + direction;
+    if (nextIndex < 0 || nextIndex >= playbackQueue.length) return;
     playTrack(playbackQueue[nextIndex]);
   };
 
@@ -2403,7 +2419,8 @@ function MusicPlayer() {
     if (currentTrackIdRef.current !== trackId) return;
     if (isRepeating) return;
     setPlayback((status) => ({ ...status, playing: false }));
-    if (playbackQueue.length > 1) {
+    const currentIndex = playbackQueue.findIndex((track) => track.id === trackId);
+    if (currentIndex >= 0 && currentIndex < playbackQueue.length - 1) {
       moveTrack(1);
     } else {
       updateNotification('paused', playback.duration);

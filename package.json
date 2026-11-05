@@ -28,6 +28,7 @@
     "@types/react": "~19.3.0",
     "eslint": "^9.0.0",
     "eslint-config-expo": "~58.0.4",
+    "patch-package": "^8.0.1",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -38,7 +39,8 @@
     "eas:init": "npx eas-cli@latest init",
     "build:apk": "npx eas-cli@latest build --platform android --profile apk",
     "build:ipa": "npx eas-cli@latest build --platform ios --profile ipa",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "postinstall": "patch-package"
   },
   "private": true
 }

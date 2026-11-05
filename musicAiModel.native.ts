@@ -5,6 +5,7 @@ import { MUSIC_AI_CLASSES, type MusicAiTag } from './musicAiTypes';
 
 // YAMNet expects mono audio resampled to 16 kHz.
 const MODEL_SAMPLE_RATE = 16_000;
+const MAX_ANALYSIS_DURATION_SECONDS = 5 * 60;
 // Metro resolves bundled TFLite models from static require calls.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const MODEL_ASSET = require('./assets/ai/yamnet.tflite') as number;
@@ -52,7 +53,7 @@ function getTags(scores: number[], classCount: number): MusicAiTag[] {
 export async function analyzeAudio(input: string | ArrayBuffer): Promise<MusicAiTag[]> {
   const [model, audio] = await Promise.all([
     getModel(),
-    decodeAudioData(input, MODEL_SAMPLE_RATE),
+    decodeAudioData(input, MODEL_SAMPLE_RATE, undefined, MAX_ANALYSIS_DURATION_SECONDS),
   ]);
   const inputTensor = model.inputs[0];
   const outputTensor = model.outputs[0];
@@ -63,14 +64,18 @@ export async function analyzeAudio(input: string | ArrayBuffer): Promise<MusicAi
   const sampleCount = tensorSize(inputTensor.shape);
   const classCount = tensorSize(outputTensor.shape);
   const summedScores = new Array<number>(classCount).fill(0);
-  const offsets = getSampleOffsets(audio.length, sampleCount);
+  const analysisLength = Math.min(
+    audio.length,
+    MAX_ANALYSIS_DURATION_SECONDS * audio.sampleRate,
+  );
+  const offsets = getSampleOffsets(analysisLength, sampleCount);
   const channels = Array.from({ length: audio.numberOfChannels }, (_, index) =>
     audio.getChannelData(index),
   );
 
   for (const offset of offsets) {
     const samples = new Float32Array(sampleCount);
-    for (let index = 0; index < sampleCount && offset + index < audio.length; index += 1) {
+    for (let index = 0; index < sampleCount && offset + index < analysisLength; index += 1) {
       let sample = 0;
       for (const channel of channels) sample += channel[offset + index] ?? 0;
       samples[index] = sample / channels.length;

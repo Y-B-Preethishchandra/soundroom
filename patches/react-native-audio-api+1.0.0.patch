@@ -1,0 +1,425 @@
+diff --git a/node_modules/react-native-audio-api/common/cpp/audioapi/HostObjects/utils/AudioDecoderHostObject.cpp b/node_modules/react-native-audio-api/common/cpp/audioapi/HostObjects/utils/AudioDecoderHostObject.cpp
+index 8946424..bdb8f5d 100644
+--- a/node_modules/react-native-audio-api/common/cpp/audioapi/HostObjects/utils/AudioDecoderHostObject.cpp
++++ b/node_modules/react-native-audio-api/common/cpp/audioapi/HostObjects/utils/AudioDecoderHostObject.cpp
+@@ -42,32 +42,40 @@ JSI_HOST_FUNCTION_IMPL(AudioDecoderHostObject, decodeWithMemoryBlock) {
+   auto size = static_cast<int>(arrayBuffer.size(runtime));
+ 
+   auto sampleRate = static_cast<float>(args[1].getNumber());
++  auto maxDurationSeconds =
++      count > 2 && args[2].isNumber() ? static_cast<float>(args[2].getNumber()) : 0.0F;
+ 
+-  auto promise = promiseVendor_->createAsyncPromise([data, size, sampleRate]() -> PromiseResolver {
+-    auto result = audiodecoding::decodeWithMemoryBlock(data, size, sampleRate);
++  auto promise = promiseVendor_->createAsyncPromise(
++      [data, size, sampleRate, maxDurationSeconds]() -> PromiseResolver {
++        auto result =
++            audiodecoding::decodeWithMemoryBlock(data, size, sampleRate, maxDurationSeconds);
+ 
+-    if (result.is_err()) {
+-      return rejectWithMessage(result.unwrap_err());
+-    }
++        if (result.is_err()) {
++          return rejectWithMessage(result.unwrap_err());
++        }
+ 
+-    return resolveWithAudioBuffer(result.unwrap());
+-  });
++        return resolveWithAudioBuffer(result.unwrap());
++      });
+   return promise;
+ }
+ 
+ JSI_HOST_FUNCTION_IMPL(AudioDecoderHostObject, decodeWithFilePath) {
+   auto sourcePath = args[0].getString(runtime).utf8(runtime);
+   auto sampleRate = static_cast<float>(args[1].getNumber());
++  auto maxDurationSeconds =
++      count > 2 && args[2].isNumber() ? static_cast<float>(args[2].getNumber()) : 0.0F;
+ 
+-  auto promise = promiseVendor_->createAsyncPromise([sourcePath, sampleRate]() -> PromiseResolver {
+-    auto result = audiodecoding::decodeWithFilePath(sourcePath, sampleRate);
++  auto promise = promiseVendor_->createAsyncPromise(
++      [sourcePath, sampleRate, maxDurationSeconds]() -> PromiseResolver {
++        auto result =
++            audiodecoding::decodeWithFilePath(sourcePath, sampleRate, maxDurationSeconds);
+ 
+-    if (result.is_err()) {
+-      return rejectWithMessage(result.unwrap_err());
+-    }
++        if (result.is_err()) {
++          return rejectWithMessage(result.unwrap_err());
++        }
+ 
+-    return resolveWithAudioBuffer(result.unwrap());
+-  });
++        return resolveWithAudioBuffer(result.unwrap());
++      });
+ 
+   return promise;
+ }
+diff --git a/node_modules/react-native-audio-api/common/cpp/audioapi/decoding/AudioDecoding.cpp b/node_modules/react-native-audio-api/common/cpp/audioapi/decoding/AudioDecoding.cpp
+index 6565ab8..31fc8bc 100644
+--- a/node_modules/react-native-audio-api/common/cpp/audioapi/decoding/AudioDecoding.cpp
++++ b/node_modules/react-native-audio-api/common/cpp/audioapi/decoding/AudioDecoding.cpp
+@@ -73,20 +73,34 @@ size_t grownDecodeCapacity(size_t currentCapacity, size_t requiredFrames) {
+ 
+ // Decodes straight into the returned planar buffer, sized up front from the
+ // decoder's frame estimate, so peak memory stays near one copy of the PCM.
+-AudioBufferResult decodeAll(decoding::AudioDecoderBackend &decoder) {
++AudioBufferResult decodeAll(
++    decoding::AudioDecoderBackend &decoder,
++    float maxDurationSeconds) {
+   constexpr size_t chunkFrames = decoding::AudioDecoderBackend::CHUNK_SIZE;
+   decoder.setPreferThroughput(true);
+   const int channels = std::max(1, decoder.outputChannels());
+   const auto outputSampleRate = static_cast<float>(decoder.outputSampleRate());
++  const size_t maxFrames = std::isfinite(maxDurationSeconds) && maxDurationSeconds > 0.0F
++      ? static_cast<size_t>(std::ceil(maxDurationSeconds * outputSampleRate))
++      : 0;
+ 
+-  const size_t initialCapacity =
++  size_t initialCapacity =
+       initialDecodeCapacity(decoder.getTotalPcmFrameCount(), outputSampleRate, chunkFrames);
++  if (maxFrames > 0) {
++    initialCapacity = std::min(initialCapacity, maxFrames);
++  }
+   auto audioBuffer = std::make_shared<AudioBuffer>(initialCapacity, channels, outputSampleRate);
+ 
+   std::vector<float> chunk(chunkFrames * static_cast<size_t>(channels));
+   size_t framesDecoded = 0;
+   while (true) {
+-    const size_t framesRead = decoder.readPcmFrames(chunk.data(), chunkFrames);
++    const size_t framesToRead = maxFrames > 0
++        ? std::min(chunkFrames, maxFrames - framesDecoded)
++        : chunkFrames;
++    if (framesToRead == 0) {
++      break;
++    }
++    const size_t framesRead = decoder.readPcmFrames(chunk.data(), framesToRead);
+     if (framesRead == 0) {
+       break;
+     }
+@@ -121,8 +135,14 @@ AudioDurationResult probeDurationFromSource(
+ 
+ AudioBufferResult decodeFromSource(
+     const decoding::DecoderSource &source,
+-    const char *errorMessage) {
+-  return withDecoderFromSource<AudioBufferResult>(source, errorMessage, decodeAll);
++    const char *errorMessage,
++    float maxDurationSeconds = 0.0F) {
++  return withDecoderFromSource<AudioBufferResult>(
++      source,
++      errorMessage,
++      [maxDurationSeconds](decoding::AudioDecoderBackend &decoder) {
++        return decodeAll(decoder, maxDurationSeconds);
++      });
+ }
+ 
+ } // namespace
+@@ -167,21 +187,30 @@ AudioDurationResult probeDurationWithUrl(
+       "Failed to open URL with FFmpeg decoder");
+ }
+ 
+-AudioBufferResult decodeWithFilePath(const std::string &path, float sampleRate) {
++AudioBufferResult decodeWithFilePath(
++    const std::string &path,
++    float sampleRate,
++    float maxDurationSeconds) {
+   const int sr = static_cast<int>(sampleRate);
+   return decodeFromSource(
+       decoding::LocalFileSource{.path = path, .sampleRate = sr},
+-      "Cannot decode file: unsupported or invalid audio format");
++      "Cannot decode file: unsupported or invalid audio format",
++      maxDurationSeconds);
+ }
+ 
+-AudioBufferResult decodeWithMemoryBlock(const void *data, size_t size, float sampleRate) {
++AudioBufferResult decodeWithMemoryBlock(
++    const void *data,
++    size_t size,
++    float sampleRate,
++    float maxDurationSeconds) {
+   const int sr = static_cast<int>(sampleRate);
+   if (data == nullptr || size == 0) {
+     return Err("Cannot decode audio data: unsupported or invalid audio format");
+   }
+   return decodeFromSource(
+       makeEncodedMemorySource(data, size, sr),
+-      "Cannot decode audio data: unsupported or invalid audio format");
++      "Cannot decode audio data: unsupported or invalid audio format",
++      maxDurationSeconds);
+ }
+ 
+ AudioBufferResult decodeWithPCMInBase64(
+diff --git a/node_modules/react-native-audio-api/common/cpp/audioapi/decoding/AudioDecoding.h b/node_modules/react-native-audio-api/common/cpp/audioapi/decoding/AudioDecoding.h
+index a86e44c..1372108 100644
+--- a/node_modules/react-native-audio-api/common/cpp/audioapi/decoding/AudioDecoding.h
++++ b/node_modules/react-native-audio-api/common/cpp/audioapi/decoding/AudioDecoding.h
+@@ -14,9 +14,16 @@ namespace audioapi::audiodecoding {
+ using AudioBufferResult = Result<std::shared_ptr<AudioBuffer>, std::string>;
+ using AudioDurationResult = Result<float, std::string>;
+ 
+-[[nodiscard]] AudioBufferResult decodeWithFilePath(const std::string &path, float sampleRate);
++[[nodiscard]] AudioBufferResult decodeWithFilePath(
++    const std::string &path,
++    float sampleRate,
++    float maxDurationSeconds = 0.0F);
+ [[nodiscard]] AudioBufferResult
+-decodeWithMemoryBlock(const void *data, size_t size, float sampleRate);
++decodeWithMemoryBlock(
++    const void *data,
++    size_t size,
++    float sampleRate,
++    float maxDurationSeconds = 0.0F);
+ [[nodiscard]] AudioBufferResult decodeWithPCMInBase64(
+     const std::string &data,
+     float inputSampleRate,
+diff --git a/node_modules/react-native-audio-api/lib/typescript/commonjs/core/AudioDecoder.d.ts b/node_modules/react-native-audio-api/lib/typescript/commonjs/core/AudioDecoder.d.ts
+index 10698c0..95984bd 100644
+--- a/node_modules/react-native-audio-api/lib/typescript/commonjs/core/AudioDecoder.d.ts
++++ b/node_modules/react-native-audio-api/lib/typescript/commonjs/core/AudioDecoder.d.ts
+@@ -1,5 +1,5 @@
+ import { DecodeDataInput } from '../types';
+ import AudioBuffer from './AudioBuffer';
+-export declare function decodeAudioData(input: DecodeDataInput, sampleRate?: number, fetchOptions?: RequestInit): Promise<AudioBuffer>;
++export declare function decodeAudioData(input: DecodeDataInput, sampleRate?: number, fetchOptions?: RequestInit, maxDurationSeconds?: number): Promise<AudioBuffer>;
+ export declare function decodePCMInBase64(base64String: string, inputSampleRate: number, inputChannelCount: number, isInterleaved?: boolean): Promise<AudioBuffer>;
+ //# sourceMappingURL=AudioDecoder.d.ts.map
+\ No newline at end of file
+diff --git a/node_modules/react-native-audio-api/lib/typescript/commonjs/web-core/AudioDecoder.web.d.ts b/node_modules/react-native-audio-api/lib/typescript/commonjs/web-core/AudioDecoder.web.d.ts
+index 25689e1..f992af0 100644
+--- a/node_modules/react-native-audio-api/lib/typescript/commonjs/web-core/AudioDecoder.web.d.ts
++++ b/node_modules/react-native-audio-api/lib/typescript/commonjs/web-core/AudioDecoder.web.d.ts
+@@ -7,12 +7,12 @@ export default class AudioDecoder {
+     private decodeAudioDataImplementation;
+     private decodeFromArrayBuffer;
+     private decodeFromRemoteUrl;
+-    decodeAudioDataInstance(input: DecodeDataInput, sampleRate?: number, fetchOptions?: RequestInit): Promise<AudioBuffer>;
++    decodeAudioDataInstance(input: DecodeDataInput, sampleRate?: number, fetchOptions?: RequestInit, maxDurationSeconds?: number): Promise<AudioBuffer>;
+     decodePCMInBase64Instance(base64String: string, inputSampleRate: number, inputChannelCount: number, interleaved: boolean): Promise<AudioBuffer>;
+     private loadDurationFromAudioElement;
+     getAudioDurationInstance(input: AudioDurationInput): Promise<number>;
+ }
+-export declare function decodeAudioData(input: DecodeDataInput, sampleRate?: number, fetchOptions?: RequestInit): Promise<AudioBuffer>;
++export declare function decodeAudioData(input: DecodeDataInput, sampleRate?: number, fetchOptions?: RequestInit, maxDurationSeconds?: number): Promise<AudioBuffer>;
+ export declare function decodePCMInBase64(base64String: string, inputSampleRate: number, inputChannelCount: number, isInterleaved?: boolean): Promise<AudioBuffer>;
+ export declare function getAudioDuration(input: AudioDurationInput): Promise<number>;
+ //# sourceMappingURL=AudioDecoder.web.d.ts.map
+\ No newline at end of file
+diff --git a/node_modules/react-native-audio-api/lib/typescript/module/core/AudioDecoder.d.ts b/node_modules/react-native-audio-api/lib/typescript/module/core/AudioDecoder.d.ts
+index 10698c0..95984bd 100644
+--- a/node_modules/react-native-audio-api/lib/typescript/module/core/AudioDecoder.d.ts
++++ b/node_modules/react-native-audio-api/lib/typescript/module/core/AudioDecoder.d.ts
+@@ -1,5 +1,5 @@
+ import { DecodeDataInput } from '../types';
+ import AudioBuffer from './AudioBuffer';
+-export declare function decodeAudioData(input: DecodeDataInput, sampleRate?: number, fetchOptions?: RequestInit): Promise<AudioBuffer>;
++export declare function decodeAudioData(input: DecodeDataInput, sampleRate?: number, fetchOptions?: RequestInit, maxDurationSeconds?: number): Promise<AudioBuffer>;
+ export declare function decodePCMInBase64(base64String: string, inputSampleRate: number, inputChannelCount: number, isInterleaved?: boolean): Promise<AudioBuffer>;
+ //# sourceMappingURL=AudioDecoder.d.ts.map
+\ No newline at end of file
+diff --git a/node_modules/react-native-audio-api/lib/typescript/module/web-core/AudioDecoder.web.d.ts b/node_modules/react-native-audio-api/lib/typescript/module/web-core/AudioDecoder.web.d.ts
+index 25689e1..f992af0 100644
+--- a/node_modules/react-native-audio-api/lib/typescript/module/web-core/AudioDecoder.web.d.ts
++++ b/node_modules/react-native-audio-api/lib/typescript/module/web-core/AudioDecoder.web.d.ts
+@@ -7,12 +7,12 @@ export default class AudioDecoder {
+     private decodeAudioDataImplementation;
+     private decodeFromArrayBuffer;
+     private decodeFromRemoteUrl;
+-    decodeAudioDataInstance(input: DecodeDataInput, sampleRate?: number, fetchOptions?: RequestInit): Promise<AudioBuffer>;
++    decodeAudioDataInstance(input: DecodeDataInput, sampleRate?: number, fetchOptions?: RequestInit, maxDurationSeconds?: number): Promise<AudioBuffer>;
+     decodePCMInBase64Instance(base64String: string, inputSampleRate: number, inputChannelCount: number, interleaved: boolean): Promise<AudioBuffer>;
+     private loadDurationFromAudioElement;
+     getAudioDurationInstance(input: AudioDurationInput): Promise<number>;
+ }
+-export declare function decodeAudioData(input: DecodeDataInput, sampleRate?: number, fetchOptions?: RequestInit): Promise<AudioBuffer>;
++export declare function decodeAudioData(input: DecodeDataInput, sampleRate?: number, fetchOptions?: RequestInit, maxDurationSeconds?: number): Promise<AudioBuffer>;
+ export declare function decodePCMInBase64(base64String: string, inputSampleRate: number, inputChannelCount: number, isInterleaved?: boolean): Promise<AudioBuffer>;
+ export declare function getAudioDuration(input: AudioDurationInput): Promise<number>;
+ //# sourceMappingURL=AudioDecoder.web.d.ts.map
+\ No newline at end of file
+diff --git a/node_modules/react-native-audio-api/src/core/AudioDecoder.ts b/node_modules/react-native-audio-api/src/core/AudioDecoder.ts
+index b228d39..04191ea 100644
+--- a/node_modules/react-native-audio-api/src/core/AudioDecoder.ts
++++ b/node_modules/react-native-audio-api/src/core/AudioDecoder.ts
+@@ -20,32 +20,35 @@ class AudioDecoder {
+   private async decodeAudioDataImplementation(
+     input: DecodeDataInput,
+     sampleRate?: number,
+-    fetchOptions?: RequestInit
++    fetchOptions?: RequestInit,
++    maxDurationSeconds?: number
+   ): Promise<AudioBuffer | null | undefined> {
+     const rate = sampleRate ?? 0;
+ 
+     if (input instanceof ArrayBuffer) {
+-      return this.decodeFromArrayBuffer(input, rate);
++      return this.decodeFromArrayBuffer(input, rate, maxDurationSeconds);
+     }
+ 
+     const stringSource = this.resolveToStringSource(input);
+     assertSupportedDecodeStringSource(stringSource);
+ 
+     if (isRemoteSource(stringSource)) {
+-      return this.decodeFromRemoteUrl(stringSource, rate, fetchOptions);
++      return this.decodeFromRemoteUrl(stringSource, rate, fetchOptions, maxDurationSeconds);
+     }
+ 
+-    return this.decodeFromLocalFile(stringSource, rate);
++    return this.decodeFromLocalFile(stringSource, rate, maxDurationSeconds);
+   }
+ 
+   private async decodeFromArrayBuffer(
+     arrayBuffer: ArrayBuffer,
+-    sampleRate: number
++    sampleRate: number,
++    maxDurationSeconds?: number
+   ): Promise<AudioBuffer> {
+     const buffer = await this.decoder.decodeWithMemoryBlock(
+       // @ts-ignore internal function
+       new Uint8Array(arrayBuffer),
+-      sampleRate
++      sampleRate,
++      maxDurationSeconds
+     );
+     return new AudioBuffer(buffer);
+   }
+@@ -62,17 +65,19 @@ class AudioDecoder {
+   private async decodeFromRemoteUrl(
+     url: string,
+     sampleRate: number,
+-    fetchOptions?: RequestInit
++    fetchOptions?: RequestInit,
++    maxDurationSeconds?: number
+   ): Promise<AudioBuffer> {
+     const arrayBuffer = await fetch(url, fetchOptions).then((res) =>
+       res.arrayBuffer()
+     );
+-    return this.decodeFromArrayBuffer(arrayBuffer, sampleRate);
++    return this.decodeFromArrayBuffer(arrayBuffer, sampleRate, maxDurationSeconds);
+   }
+ 
+   private async decodeFromLocalFile(
+     stringSource: string,
+-    sampleRate: number
++    sampleRate: number,
++    maxDurationSeconds?: number
+   ): Promise<AudioBuffer> {
+     const useAndroidBundledAssetReader =
+       Platform.OS === 'android' &&
+@@ -87,11 +92,11 @@ class AudioDecoder {
+           stringSource
+         );
+       const arrayBuffer = base64ToArrayBuffer(base64Payload);
+-      return this.decodeFromArrayBuffer(arrayBuffer, sampleRate);
++      return this.decodeFromArrayBuffer(arrayBuffer, sampleRate, maxDurationSeconds);
+     }
+ 
+     const filePath = resolveLocalFilePath(stringSource);
+-    const buffer = await this.decoder.decodeWithFilePath(filePath, sampleRate);
++    const buffer = await this.decoder.decodeWithFilePath(filePath, sampleRate, maxDurationSeconds);
+     return new AudioBuffer(buffer);
+   }
+ 
+@@ -106,12 +111,14 @@ class AudioDecoder {
+   public async decodeAudioDataInstance(
+     input: DecodeDataInput,
+     sampleRate?: number,
+-    fetchOptions?: RequestInit
++    fetchOptions?: RequestInit,
++    maxDurationSeconds?: number
+   ): Promise<AudioBuffer> {
+     const audioBuffer = await this.decodeAudioDataImplementation(
+       input,
+       sampleRate,
+-      fetchOptions
++      fetchOptions,
++      maxDurationSeconds
+     );
+ 
+     if (!audioBuffer) {
+@@ -140,12 +147,14 @@ class AudioDecoder {
+ export async function decodeAudioData(
+   input: DecodeDataInput,
+   sampleRate?: number,
+-  fetchOptions?: RequestInit
++  fetchOptions?: RequestInit,
++  maxDurationSeconds?: number
+ ): Promise<AudioBuffer> {
+   return AudioDecoder.getInstance().decodeAudioDataInstance(
+     input,
+     sampleRate,
+-    fetchOptions
++    fetchOptions,
++    maxDurationSeconds
+   );
+ }
+ 
+diff --git a/node_modules/react-native-audio-api/src/jsi-interfaces.ts b/node_modules/react-native-audio-api/src/jsi-interfaces.ts
+index c79e8c0..bccdace 100644
+--- a/node_modules/react-native-audio-api/src/jsi-interfaces.ts
++++ b/node_modules/react-native-audio-api/src/jsi-interfaces.ts
+@@ -386,11 +386,13 @@ export interface IAudioRecorder {
+ export interface IAudioDecoder {
+   decodeWithMemoryBlock: (
+     arrayBuffer: ArrayBuffer,
+-    sampleRate?: number
++    sampleRate?: number,
++    maxDurationSeconds?: number
+   ) => Promise<IAudioBuffer>;
+   decodeWithFilePath: (
+     sourcePath: string,
+-    sampleRate?: number
++    sampleRate?: number,
++    maxDurationSeconds?: number
+   ) => Promise<IAudioBuffer>;
+   decodeWithPCMInBase64: (
+     b64: string,
+diff --git a/node_modules/react-native-audio-api/src/web-core/AudioDecoder.web.ts b/node_modules/react-native-audio-api/src/web-core/AudioDecoder.web.ts
+index 7a7af10..bdb48a0 100644
+--- a/node_modules/react-native-audio-api/src/web-core/AudioDecoder.web.ts
++++ b/node_modules/react-native-audio-api/src/web-core/AudioDecoder.web.ts
+@@ -24,7 +24,8 @@ export default class AudioDecoder {
+   private async decodeAudioDataImplementation(
+     input: DecodeDataInput,
+     sampleRate?: number,
+-    fetchOptions?: RequestInit
++    fetchOptions?: RequestInit,
++    _maxDurationSeconds?: number
+   ): Promise<AudioBuffer | null | undefined> {
+     const rate = sampleRate ?? 0;
+ 
+@@ -64,12 +65,14 @@ export default class AudioDecoder {
+   public async decodeAudioDataInstance(
+     input: DecodeDataInput,
+     sampleRate?: number,
+-    fetchOptions?: RequestInit
++    fetchOptions?: RequestInit,
++    maxDurationSeconds?: number
+   ): Promise<AudioBuffer> {
+     const audioBuffer = await this.decodeAudioDataImplementation(
+       input,
+       sampleRate,
+-      fetchOptions
++      fetchOptions,
++      maxDurationSeconds
+     );
+ 
+     if (!audioBuffer) {
+@@ -208,12 +211,14 @@ export default class AudioDecoder {
+ export async function decodeAudioData(
+   input: DecodeDataInput,
+   sampleRate?: number,
+-  fetchOptions?: RequestInit
++  fetchOptions?: RequestInit,
++  maxDurationSeconds?: number
+ ): Promise<AudioBuffer> {
+   return AudioDecoder.getInstance().decodeAudioDataInstance(
+     input,
+     sampleRate,
+-    fetchOptions
++    fetchOptions,
++    maxDurationSeconds
+   );
+ }
+ 
