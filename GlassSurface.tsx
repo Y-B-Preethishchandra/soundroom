@@ -1,5 +1,5 @@
 import { BlurView } from 'expo-blur';
-import type { PropsWithChildren } from 'react';
+import type { ComponentRef, PropsWithChildren, RefObject } from 'react';
 import { Platform, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 
 export default function GlassSurface({
@@ -8,15 +8,18 @@ export default function GlassSurface({
   contentStyle,
   intensity = 42,
   light = false,
+  blurTarget,
 }: PropsWithChildren<{
   style?: StyleProp<ViewStyle>;
   contentStyle?: StyleProp<ViewStyle>;
   intensity?: number;
   light?: boolean;
+  blurTarget?: RefObject<ComponentRef<typeof View> | null>;
 }>) {
   return (
     <View style={[styles.surface, light ? styles.surfaceLight : styles.surfaceDark, style]}>
       <BlurView
+        blurTarget={blurTarget}
         blurMethod={Platform.OS === 'android' ? 'dimezisBlurViewSdk31Plus' : undefined}
         intensity={intensity}
         pointerEvents="none"

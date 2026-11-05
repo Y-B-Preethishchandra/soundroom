@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as DocumentPicker from 'expo-document-picker';
+import { BlurTargetView } from 'expo-blur';
 import { Directory, File, FileMode, Paths, type FileHandle } from 'expo-file-system';
 import { StatusBar } from 'expo-status-bar';
 import { Reader } from 'jsmediatags/dist/jsmediatags.min.js';
@@ -16,7 +17,14 @@ import {
   type BiquadFilterNode,
   type MediaElementAudioSourceNode,
 } from 'react-native-audio-api';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentRef,
+} from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -364,14 +372,371 @@ type LibraryListItem =
   | { kind: 'group'; group: LibraryGroup }
   | { kind: 'playlist'; playlist: Playlist };
 
-const BROWSE_MODES: { id: BrowseMode; label: string }[] = [
-  { id: 'songs', label: 'Songs' },
-  { id: 'albums', label: 'Albums' },
-  { id: 'artists', label: 'Artists' },
-  { id: 'composers', label: 'Composers' },
-  { id: 'genres', label: 'Genres' },
-  { id: 'playlists', label: 'Playlists' },
+type DockIconName =
+  | 'songs'
+  | 'albums'
+  | 'artists'
+  | 'composers'
+  | 'genres'
+  | 'playlists'
+  | 'files'
+  | 'folder'
+  | 'play'
+  | 'pause';
+
+const BROWSE_MODES: { id: BrowseMode; label: string; icon: DockIconName }[] = [
+  { id: 'songs', label: 'Songs', icon: 'songs' },
+  { id: 'albums', label: 'Albums', icon: 'albums' },
+  { id: 'artists', label: 'Artists', icon: 'artists' },
+  { id: 'composers', label: 'Composers', icon: 'composers' },
+  { id: 'genres', label: 'Genres', icon: 'genres' },
+  { id: 'playlists', label: 'Playlists', icon: 'playlists' },
 ];
+
+function DockIcon({ name, color }: { name: DockIconName; color: string }) {
+  const strokeStyle = { borderColor: color };
+  const fillStyle = { backgroundColor: color };
+
+  switch (name) {
+    case 'songs':
+      return (
+        <View style={dockIconStyles.icon}>
+          <View style={[dockIconStyles.noteStem, dockIconStyles.noteStemBack, fillStyle]} />
+          <View style={[dockIconStyles.noteStem, dockIconStyles.noteStemFront, fillStyle]} />
+          <View style={[dockIconStyles.noteBeam, fillStyle]} />
+          <View style={[dockIconStyles.noteHead, dockIconStyles.noteHeadBack, fillStyle]} />
+          <View style={[dockIconStyles.noteHead, dockIconStyles.noteHeadFront, fillStyle]} />
+        </View>
+      );
+    case 'albums':
+      return (
+        <View style={dockIconStyles.icon}>
+          <View style={[dockIconStyles.albumBack, strokeStyle]} />
+          <View style={[dockIconStyles.albumCover, strokeStyle]}>
+            <View style={[dockIconStyles.albumDisc, strokeStyle]}>
+              <View style={[dockIconStyles.albumCenter, fillStyle]} />
+            </View>
+          </View>
+        </View>
+      );
+    case 'artists':
+      return (
+        <View style={dockIconStyles.icon}>
+          <View style={[dockIconStyles.artistHead, fillStyle]} />
+          <View style={[dockIconStyles.artistBody, fillStyle]} />
+        </View>
+      );
+    case 'composers':
+      return (
+        <View style={dockIconStyles.icon}>
+          <View style={[dockIconStyles.composerPage, strokeStyle]}>
+            <View style={[dockIconStyles.composerLine, fillStyle]} />
+            <View style={[dockIconStyles.composerLine, dockIconStyles.composerLineShort, fillStyle]} />
+          </View>
+          <View style={[dockIconStyles.composerPencil, fillStyle]} />
+        </View>
+      );
+    case 'genres':
+      return (
+        <View style={dockIconStyles.icon}>
+          <View style={[dockIconStyles.genreTag, strokeStyle]}>
+            <View style={[dockIconStyles.genreHole, fillStyle]} />
+          </View>
+        </View>
+      );
+    case 'playlists':
+      return (
+        <View style={dockIconStyles.icon}>
+          {[0, 1, 2].map((row) => (
+            <View key={row} style={dockIconStyles.playlistRow}>
+              <View style={[dockIconStyles.playlistBullet, fillStyle]} />
+              <View
+                style={[
+                  dockIconStyles.playlistLine,
+                  row === 1 && dockIconStyles.playlistLineShort,
+                  fillStyle,
+                ]}
+              />
+            </View>
+          ))}
+        </View>
+      );
+    case 'files':
+      return (
+        <View style={dockIconStyles.icon}>
+          <View style={[dockIconStyles.filePage, strokeStyle]}>
+            <View style={[dockIconStyles.fileFold, strokeStyle]} />
+            <View style={[dockIconStyles.fileLine, fillStyle]} />
+          </View>
+          <View style={[dockIconStyles.filePlusHorizontal, fillStyle]} />
+          <View style={[dockIconStyles.filePlusVertical, fillStyle]} />
+        </View>
+      );
+    case 'folder':
+      return (
+        <View style={dockIconStyles.icon}>
+          <View style={[dockIconStyles.folderTab, strokeStyle]} />
+          <View style={[dockIconStyles.folderBody, strokeStyle]} />
+        </View>
+      );
+    case 'play':
+      return (
+        <View style={dockIconStyles.icon}>
+          <View style={[dockIconStyles.playTriangle, { borderLeftColor: color }]} />
+        </View>
+      );
+    case 'pause':
+      return (
+        <View style={[dockIconStyles.icon, dockIconStyles.pauseIcon]}>
+          <View style={[dockIconStyles.pauseBar, fillStyle]} />
+          <View style={[dockIconStyles.pauseBar, fillStyle]} />
+        </View>
+      );
+  }
+}
+
+const dockIconStyles = StyleSheet.create({
+  icon: {
+    width: 18,
+    height: 18,
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  noteStem: {
+    position: 'absolute',
+    width: 1.5,
+    borderRadius: 1,
+  },
+  noteStemBack: {
+    height: 8,
+    left: 7,
+    top: 3,
+  },
+  noteStemFront: {
+    height: 10,
+    right: 3,
+    top: 1,
+  },
+  noteBeam: {
+    position: 'absolute',
+    height: 1.5,
+    width: 8,
+    right: 3,
+    top: 1,
+    transform: [{ rotate: '-12deg' }],
+  },
+  noteHead: {
+    position: 'absolute',
+    width: 6,
+    height: 4,
+    borderRadius: 4,
+    bottom: 3,
+    transform: [{ rotate: '-22deg' }],
+  },
+  noteHeadBack: {
+    left: 2,
+  },
+  noteHeadFront: {
+    left: 8,
+  },
+  albumBack: {
+    position: 'absolute',
+    width: 11,
+    height: 12,
+    left: 2,
+    top: 2,
+    borderWidth: 1.3,
+    borderRadius: 2,
+  },
+  albumCover: {
+    width: 12,
+    height: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.3,
+    borderRadius: 2,
+    backgroundColor: 'transparent',
+  },
+  albumDisc: {
+    width: 7,
+    height: 7,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderRadius: 4,
+  },
+  albumCenter: {
+    width: 2,
+    height: 2,
+    borderRadius: 1,
+  },
+  artistHead: {
+    position: 'absolute',
+    top: 1,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  artistBody: {
+    position: 'absolute',
+    bottom: 1,
+    width: 14,
+    height: 8,
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+    borderBottomLeftRadius: 3,
+    borderBottomRightRadius: 3,
+  },
+  composerPage: {
+    position: 'absolute',
+    left: 2,
+    top: 1,
+    width: 11,
+    height: 15,
+    borderWidth: 1.3,
+    borderRadius: 2,
+    paddingTop: 5,
+    paddingHorizontal: 2,
+    gap: 2,
+    backgroundColor: 'transparent',
+  },
+  composerLine: {
+    height: 1,
+    width: 5,
+    borderRadius: 1,
+  },
+  composerLineShort: {
+    width: 4,
+  },
+  composerPencil: {
+    position: 'absolute',
+    right: 2,
+    bottom: 2,
+    width: 2.5,
+    height: 9,
+    borderRadius: 1,
+    transform: [{ rotate: '38deg' }],
+  },
+  genreTag: {
+    width: 13,
+    height: 9,
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+    borderWidth: 1.4,
+    borderRadius: 2,
+    transform: [{ rotate: '-35deg' }],
+  },
+  genreHole: {
+    width: 2.5,
+    height: 2.5,
+    borderRadius: 2,
+    marginLeft: 2,
+  },
+  playlistRow: {
+    height: 4,
+    width: 15,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+  },
+  playlistBullet: {
+    width: 2,
+    height: 2,
+    borderRadius: 1,
+  },
+  playlistLine: {
+    height: 1.4,
+    width: 10,
+    borderRadius: 1,
+  },
+  playlistLineShort: {
+    width: 7,
+  },
+  filePage: {
+    position: 'absolute',
+    left: 3,
+    top: 1,
+    width: 11,
+    height: 15,
+    borderWidth: 1.3,
+    borderRadius: 2,
+    backgroundColor: 'transparent',
+  },
+  fileFold: {
+    position: 'absolute',
+    right: -1,
+    top: -1,
+    width: 4,
+    height: 4,
+    borderLeftWidth: 1.2,
+    borderBottomWidth: 1.2,
+  },
+  fileLine: {
+    position: 'absolute',
+    left: 2,
+    top: 7,
+    width: 5,
+    height: 1,
+    borderRadius: 1,
+  },
+  filePlusHorizontal: {
+    position: 'absolute',
+    right: 0,
+    bottom: 2,
+    width: 7,
+    height: 1.5,
+    borderRadius: 1,
+  },
+  filePlusVertical: {
+    position: 'absolute',
+    right: 2.75,
+    bottom: -0.75,
+    width: 1.5,
+    height: 7,
+    borderRadius: 1,
+  },
+  folderTab: {
+    position: 'absolute',
+    left: 2,
+    top: 3,
+    width: 8,
+    height: 4,
+    borderWidth: 1.3,
+    borderBottomWidth: 0,
+    borderTopLeftRadius: 2,
+    borderTopRightRadius: 2,
+  },
+  folderBody: {
+    position: 'absolute',
+    left: 1,
+    top: 6,
+    width: 16,
+    height: 10,
+    borderWidth: 1.3,
+    borderRadius: 2,
+    backgroundColor: 'transparent',
+  },
+  playTriangle: {
+    width: 0,
+    height: 0,
+    marginLeft: 2,
+    borderTopWidth: 6,
+    borderBottomWidth: 6,
+    borderLeftWidth: 9,
+    borderTopColor: 'transparent',
+    borderBottomColor: 'transparent',
+  },
+  pauseIcon: {
+    flexDirection: 'row',
+    gap: 3,
+  },
+  pauseBar: {
+    width: 2.5,
+    height: 10,
+    borderRadius: 1,
+  },
+});
 
 const SORT_OPTIONS: { id: SortMode; label: string }[] = [
   { id: 'name', label: 'Name' },
@@ -965,6 +1330,7 @@ function MusicPlayer() {
     Platform.OS === 'web' ? null : new AudioContext({ latencyHint: 'playback' }),
   );
   const audioRef = useRef<AudioTagHandle>(null);
+  const libraryBlurTarget = useRef<ComponentRef<typeof View> | null>(null);
   const equalizerSource = useRef<MediaElementAudioSourceNode | null>(null);
   const equalizerFilters = useRef<BiquadFilterNode[]>([]);
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -2462,118 +2828,50 @@ function MusicPlayer() {
         </Pressable>
       </View>
 
-      <GlassSurface
-        light={isLightTheme}
-        contentStyle={styles.hero}
-        intensity={32}
-        style={styles.heroGlass}
-      >
-        <Pressable
-          accessibilityRole="button"
-          disabled={isImporting || isLoading}
-          onPress={importSongs}
-          style={({ pressed }) => [
-            styles.importButton,
-            pressed && styles.buttonPressed,
-            (isImporting || isLoading) && styles.buttonDisabled,
-          ]}
+      {Platform.OS !== 'web' && (
+        <GlassSurface
+          light={isLightTheme}
+          contentStyle={styles.hero}
+          intensity={32}
+          style={styles.heroGlass}
         >
-          {isImporting || isLoading ? (
-            <ActivityIndicator color={COLORS.ink} />
+          {Platform.OS === 'ios' ? (
+            <Text style={styles.importHint}>
+              Or copy music into Files › On My iPhone › Soundroom. New files are added when you open the app.
+            </Text>
           ) : (
-            <Text style={styles.importButtonIcon}>＋</Text>
-          )}
-          <Text style={styles.importButtonText}>
-            {isImporting
-              ? 'ADDING YOUR MUSIC'
-              : isLoading
-                ? 'LOADING YOUR LIBRARY'
-                : 'ADD MUSIC FROM DEVICE'}
-          </Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          disabled={isImporting || isLoading}
-          onPress={importMusicFolder}
-          style={({ pressed }) => [
-            styles.folderImportButton,
-            pressed && styles.buttonPressed,
-            (isImporting || isLoading) && styles.buttonDisabled,
-          ]}
-        >
-          <Text style={styles.folderImportIcon}>▣</Text>
-          <Text style={styles.folderImportText}>
-            {isImporting ? 'ADDING YOUR MUSIC' : 'ADD A MUSIC FOLDER'}
-          </Text>
-        </Pressable>
-        {Platform.OS === 'ios' ? (
-          <Text style={styles.importHint}>
-            Or copy music into Files › On My iPhone › Soundroom. New files are added when you open the app.
-          </Text>
-        ) : Platform.OS === 'android' ? (
-          <View style={styles.dropFolderActions}>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => void chooseDropFolder()}
-              style={styles.dropFolderButton}
-            >
-              <Text style={styles.dropFolderButtonText}>
-                {dropFolderUri ? 'CHANGE MUSIC DROP FOLDER' : 'SET MUSIC DROP FOLDER'}
-              </Text>
-            </Pressable>
-            {dropFolderUri && (
-              <>
-                <Text numberOfLines={1} style={styles.dropFolderStatus}>
-                  {isScanningDropFolder
-                    ? 'SCANNING FOLDER…'
-                    : `CONNECTED · ${new Directory(dropFolderUri).name}`}
+            <View style={styles.dropFolderActions}>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => void chooseDropFolder()}
+                style={styles.dropFolderButton}
+              >
+                <Text style={styles.dropFolderButtonText}>
+                  {dropFolderUri ? 'CHANGE MUSIC DROP FOLDER' : 'SET MUSIC DROP FOLDER'}
                 </Text>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Scan music drop folder"
-                  disabled={isScanningDropFolder || isLoading}
-                  onPress={() => setDropFolderScanRequest((request) => request + 1)}
-                  style={styles.dropFolderButton}
-                >
-                  <Text style={styles.dropFolderButtonText}>SCAN FOLDER NOW</Text>
-                </Pressable>
-              </>
-            )}
-          </View>
-        ) : (
-          <Text style={styles.importHint}>
-            Select songs or import a folder, including its subfolders
-          </Text>
-        )}
-      </GlassSurface>
-
-      <ScrollView
-        contentContainerStyle={styles.browseTabsContent}
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.browseTabs}
-      >
-        {BROWSE_MODES.map((mode) => {
-          const selected = browseMode === mode.id;
-          return (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityState={{ selected }}
-              key={mode.id}
-              onPress={() => {
-                setBrowseMode(mode.id);
-                setSelectedGroup(null);
-                setSelectedPlaylistId(null);
-              }}
-              style={[styles.browseTab, selected && styles.browseTabSelected]}
-            >
-              <Text style={[styles.browseTabText, selected && styles.browseTabTextSelected]}>
-                {mode.label}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </ScrollView>
+              </Pressable>
+              {dropFolderUri && (
+                <>
+                  <Text numberOfLines={1} style={styles.dropFolderStatus}>
+                    {isScanningDropFolder
+                      ? 'SCANNING FOLDER…'
+                      : `CONNECTED · ${new Directory(dropFolderUri).name}`}
+                  </Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Scan music drop folder"
+                    disabled={isScanningDropFolder || isLoading}
+                    onPress={() => setDropFolderScanRequest((request) => request + 1)}
+                    style={styles.dropFolderButton}
+                  >
+                    <Text style={styles.dropFolderButtonText}>SCAN FOLDER NOW</Text>
+                  </Pressable>
+                </>
+              )}
+            </View>
+          )}
+        </GlassSurface>
+      )}
 
       <View style={styles.libraryHeading}>
         <View>
@@ -2722,137 +3020,207 @@ function MusicPlayer() {
           </Audio>
         </View>
       )}
-      <FlatList
-        data={libraryItems}
-        keyExtractor={(item) =>
-          item.kind === 'group'
-            ? item.group.id
-            : item.kind === 'playlist'
-              ? item.playlist.id
-              : item.track.id
-        }
-        renderItem={({ item, index }) =>
-          item.kind === 'group'
-            ? renderGroup(item.group)
-            : item.kind === 'playlist'
-              ? renderPlaylist(item.playlist)
-              : renderTrack({ item: item.track, index })
-        }
-        ListHeaderComponent={listHeader}
-        ListEmptyComponent={
-          isLoading ? (
-            <View style={styles.emptyState}>
-              <ActivityIndicator color={COLORS.accent} />
-              <Text style={styles.emptyCaption}>Opening your library…</Text>
-            </View>
-          ) : listingPlaylists && playlists.length === 0 ? (
-            <View style={styles.emptyState}>
-              <View style={styles.emptyArtwork}>
-                <Text style={styles.emptyNote}>♫</Text>
+      <BlurTargetView ref={libraryBlurTarget} style={styles.libraryBlurTarget}>
+        <FlatList
+          data={libraryItems}
+          keyExtractor={(item) =>
+            item.kind === 'group'
+              ? item.group.id
+              : item.kind === 'playlist'
+                ? item.playlist.id
+                : item.track.id
+          }
+          renderItem={({ item, index }) =>
+            item.kind === 'group'
+              ? renderGroup(item.group)
+              : item.kind === 'playlist'
+                ? renderPlaylist(item.playlist)
+                : renderTrack({ item: item.track, index })
+          }
+          ListHeaderComponent={listHeader}
+          ListEmptyComponent={
+            isLoading ? (
+              <View style={styles.emptyState}>
+                <ActivityIndicator color={COLORS.accent} />
+                <Text style={styles.emptyCaption}>Opening your library…</Text>
               </View>
-              <Text style={styles.emptyTitle}>Make it yours.</Text>
-              <Text style={styles.emptyCaption}>
-                Create a playlist, then add songs from your library.
-              </Text>
+            ) : listingPlaylists && playlists.length === 0 ? (
+              <View style={styles.emptyState}>
+                <View style={styles.emptyArtwork}>
+                  <Text style={styles.emptyNote}>♫</Text>
+                </View>
+                <Text style={styles.emptyTitle}>Make it yours.</Text>
+                <Text style={styles.emptyCaption}>
+                  Create a playlist, then add songs from your library.
+                </Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ disabled: !playlistsReady }}
+                  disabled={!playlistsReady}
+                  onPress={() => openPlaylistEditor()}
+                  style={styles.emptyCreateButton}
+                >
+                  <Text style={styles.newPlaylistButtonText}>＋ CREATE PLAYLIST</Text>
+                </Pressable>
+              </View>
+            ) : tracks.length === 0 && !selectedPlaylist && !listingPlaylists ? (
+              <View style={styles.emptyState}>
+                <View style={styles.emptyArtwork}>
+                  <Text style={styles.emptyNote}>♫</Text>
+                </View>
+                <Text style={styles.emptyTitle}>A little quiet in here.</Text>
+                <Text style={styles.emptyCaption}>
+                  Add songs from your device and they’ll be ready whenever you are.
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyTitle}>
+                  {selectedPlaylist
+                    ? 'This playlist is empty'
+                    : listingGroups
+                      ? `No ${activeModeLabel.toLowerCase()} found`
+                      : 'No matches'}
+                </Text>
+                <Text style={styles.emptyCaption}>
+                  {selectedPlaylist
+                    ? 'Use the plus button beside a song to add it to this playlist.'
+                    : listingGroups
+                      ? 'Try another search or choose a different category.'
+                      : 'Try a different search or category.'}
+                </Text>
+              </View>
+            )
+          }
+          contentContainerStyle={[
+            styles.listContent,
+            { paddingBottom: currentTrack ? 196 + insets.bottom : 128 + insets.bottom },
+          ]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        />
+      </BlurTargetView>
+
+      <View style={styles.bottomDock}>
+        <View
+          style={[
+            styles.dockContent,
+            { paddingBottom: Math.max(insets.bottom, 14) },
+          ]}
+        >
+          {currentTrack && (
+            <GlassSurface
+              blurTarget={libraryBlurTarget}
+              light={isLightTheme}
+              contentStyle={styles.miniPlayerContent}
+              intensity={35}
+              style={styles.miniPlayerGlass}
+            >
               <Pressable
                 accessibilityRole="button"
-                accessibilityState={{ disabled: !playlistsReady }}
-                disabled={!playlistsReady}
-                onPress={() => openPlaylistEditor()}
-                style={styles.emptyCreateButton}
+                accessibilityLabel={`Open player for ${currentTrack.title}`}
+                onPress={() => setIsPlayerOpen(true)}
+                style={styles.miniPlayer}
               >
-                <Text style={styles.newPlaylistButtonText}>＋ CREATE PLAYLIST</Text>
+                <Artwork seed={currentTrack.id} size={44} uri={currentTrack.artworkUri} styles={styles} />
+                <View style={styles.miniInfo}>
+                  <Text numberOfLines={1} style={styles.miniTitle}>{currentTrack.title}</Text>
+                  <Text numberOfLines={1} style={styles.miniArtist}>{currentTrack.artist}</Text>
+                  <ProgressBar
+                    compact
+                    currentTime={playback.currentTime}
+                    duration={playback.duration}
+                    onSeek={seekTo}
+                    styles={styles}
+                  />
+                </View>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={playback.playing ? 'Pause' : 'Play'}
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    togglePlayback();
+                  }}
+                  hitSlop={12}
+                  style={styles.miniPlayButton}
+                >
+                  <DockIcon name={playback.playing ? 'pause' : 'play'} color={COLORS.ink} />
+                </Pressable>
               </Pressable>
-            </View>
-          ) : tracks.length === 0 && !selectedPlaylist && !listingPlaylists ? (
-            <View style={styles.emptyState}>
-              <View style={styles.emptyArtwork}>
-                <Text style={styles.emptyNote}>♫</Text>
-              </View>
-              <Text style={styles.emptyTitle}>A little quiet in here.</Text>
-              <Text style={styles.emptyCaption}>
-                Add songs from your device and they’ll be ready whenever you are.
-              </Text>
-            </View>
-          ) : (
-            <View style={styles.emptyState}>
-              <Text style={styles.emptyTitle}>
-                {selectedPlaylist
-                  ? 'This playlist is empty'
-                  : listingGroups
-                    ? `No ${activeModeLabel.toLowerCase()} found`
-                    : 'No matches'}
-              </Text>
-              <Text style={styles.emptyCaption}>
-                {selectedPlaylist
-                  ? 'Use the plus button beside a song to add it to this playlist.'
-                  : listingGroups
-                  ? 'Try another search or choose a different category.'
-                  : 'Try a different search or category.'}
-              </Text>
-            </View>
-          )
-        }
-        contentContainerStyle={[
-          styles.listContent,
-          { paddingBottom: currentTrack ? 184 + insets.bottom : 72 + insets.bottom },
-        ]}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      />
-
-      <GlassSurface
-        light={isLightTheme}
-        contentStyle={[
-          styles.dockContent,
-          { paddingBottom: Math.max(insets.bottom, 14) },
-        ]}
-        intensity={72}
-        style={styles.bottomDock}
-      >
-        {currentTrack ? (
-          <GlassSurface light={isLightTheme} contentStyle={styles.miniPlayerContent} intensity={35} style={styles.miniPlayerGlass}>
+            </GlassSurface>
+          )}
+          <View style={styles.dockImportActions}>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={`Open player for ${currentTrack.title}`}
-              onPress={() => setIsPlayerOpen(true)}
-              style={styles.miniPlayer}
+              accessibilityLabel="Add music from files"
+              accessibilityState={{ disabled: isImporting || isLoading }}
+              disabled={isImporting || isLoading}
+              onPress={importSongs}
+              style={({ pressed }) => [
+                styles.dockImportButton,
+                pressed && styles.buttonPressed,
+                (isImporting || isLoading) && styles.buttonDisabled,
+              ]}
             >
-              <Artwork seed={currentTrack.id} size={44} uri={currentTrack.artworkUri} styles={styles} />
-              <View style={styles.miniInfo}>
-                <Text numberOfLines={1} style={styles.miniTitle}>{currentTrack.title}</Text>
-                <Text numberOfLines={1} style={styles.miniArtist}>{currentTrack.artist}</Text>
-                <ProgressBar
-                  compact
-                  currentTime={playback.currentTime}
-                  duration={playback.duration}
-                  onSeek={seekTo}
-                  styles={styles}
-                />
-              </View>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={playback.playing ? 'Pause' : 'Play'}
-                onPress={(event) => {
-                  event.stopPropagation();
-                  togglePlayback();
-                }}
-                hitSlop={12}
-                style={styles.miniPlayButton}
-              >
-                <Text style={styles.miniPlayIcon}>{playback.playing ? 'Ⅱ' : '▶'}</Text>
-              </Pressable>
+              <DockIcon name="files" color={COLORS.accent} />
+              <Text style={styles.dockImportText}>
+                {isImporting ? 'ADDING…' : 'ADD FILES'}
+              </Text>
             </Pressable>
-          </GlassSurface>
-        ) : (
-          <View style={styles.noTrackDock}>
-            <Text style={styles.noTrackSymbol}>◌</Text>
-            <Text style={styles.noTrackText}>YOUR DEVICE. YOUR MUSIC.</Text>
-            <Text style={styles.noTrackMark}>S</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Add a music folder"
+              accessibilityState={{ disabled: isImporting || isLoading }}
+              disabled={isImporting || isLoading}
+              onPress={importMusicFolder}
+              style={({ pressed }) => [
+                styles.dockImportButton,
+                pressed && styles.buttonPressed,
+                (isImporting || isLoading) && styles.buttonDisabled,
+              ]}
+            >
+              <DockIcon name="folder" color={COLORS.accent} />
+              <Text style={styles.dockImportText}>ADD FOLDER</Text>
+            </Pressable>
           </View>
-        )}
-        <Text style={styles.dockCaption}>MADE FOR OFFLINE LISTENING</Text>
-      </GlassSurface>
+          <GlassSurface
+            blurTarget={libraryBlurTarget}
+            light={isLightTheme}
+            contentStyle={styles.navigationBarContent}
+            intensity={78}
+            style={styles.navigationBar}
+          >
+            {BROWSE_MODES.map((mode) => {
+              const selected = browseMode === mode.id;
+              return (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={mode.label}
+                  accessibilityState={{ selected }}
+                  key={mode.id}
+                  onPress={() => {
+                    setBrowseMode(mode.id);
+                    setSelectedGroup(null);
+                    setSelectedPlaylistId(null);
+                  }}
+                  style={[styles.browseTab, selected && styles.browseTabSelected]}
+                >
+                  <DockIcon
+                    name={mode.icon}
+                    color={selected ? COLORS.accent : COLORS.secondaryText}
+                  />
+                  <Text
+                    numberOfLines={1}
+                    style={[styles.browseTabText, selected && styles.browseTabTextSelected]}
+                  >
+                    {mode.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </GlassSurface>
+        </View>
+      </View>
 
       <Modal
         animationType="slide"
@@ -3364,6 +3732,9 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     flex: 1,
     backgroundColor: COLORS.background,
   },
+  libraryBlurTarget: {
+    flex: 1,
+  },
   listContent: {
     paddingHorizontal: 22,
   },
@@ -3532,57 +3903,12 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     fontWeight: '800',
     letterSpacing: 2,
   },
-  importButton: {
-    height: 54,
-    borderRadius: 15,
-    backgroundColor: COLORS.accent,
-    marginTop: 24,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 9,
-  },
-  folderImportButton: {
-    height: 46,
-    borderRadius: 14,
-    backgroundColor: COLORS.controlSurface,
-    borderWidth: 1,
-    borderColor: COLORS.controlBorder,
-    marginTop: 9,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-  },
   buttonPressed: {
     opacity: 0.82,
     transform: [{ scale: 0.99 }],
   },
   buttonDisabled: {
     opacity: 0.7,
-  },
-  importButtonIcon: {
-    color: COLORS.ink,
-    fontSize: 22,
-    lineHeight: 24,
-    fontWeight: '400',
-  },
-  importButtonText: {
-    color: COLORS.ink,
-    fontSize: 11,
-    fontWeight: '900',
-    letterSpacing: 1.3,
-  },
-  folderImportIcon: {
-    color: COLORS.accent,
-    fontSize: 15,
-    lineHeight: 18,
-  },
-  folderImportText: {
-    color: COLORS.primaryText,
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 1.1,
   },
   importHint: {
     color: COLORS.muted,
@@ -3617,31 +3943,55 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     fontSize: 8,
     letterSpacing: 0.4,
   },
-  browseTabs: {
-    marginTop: 1,
-    marginBottom: 21,
-    marginHorizontal: -22,
+  navigationBar: {
+    alignSelf: 'center',
+    width: '100%',
+    maxWidth: 540,
+    borderRadius: 23,
   },
-  browseTabsContent: {
-    paddingHorizontal: 22,
+  navigationBarContent: {
+    minHeight: 62,
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 4,
+  },
+  dockImportActions: {
+    flexDirection: 'row',
     gap: 8,
   },
-  browseTab: {
-    minHeight: 34,
+  dockImportButton: {
+    flex: 1,
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 14,
-    borderRadius: 18,
+    gap: 7,
+    borderRadius: 14,
     backgroundColor: COLORS.controlSurface,
     borderWidth: 1,
     borderColor: COLORS.controlBorder,
   },
+  dockImportText: {
+    color: COLORS.primaryText,
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  browseTab: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    borderRadius: 18,
+  },
   browseTabSelected: {
     backgroundColor: COLORS.selectedSurface,
-    borderColor: COLORS.selectedBorder,
   },
   browseTabText: {
     color: COLORS.secondaryText,
-    fontSize: 10,
+    fontSize: 8,
     fontWeight: '700',
   },
   browseTabTextSelected: {
@@ -3651,7 +4001,7 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     flexDirection: 'row',
     alignItems: 'flex-end',
     justifyContent: 'space-between',
-    marginTop: 2,
+    marginTop: 20,
     marginBottom: 17,
   },
   groupBack: {
@@ -4169,23 +4519,18 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
   },
   bottomDock: {
     position: 'absolute',
-    left: 0,
-    right: 0,
+    left: 14,
+    right: 14,
     bottom: 0,
-    backgroundColor: COLORS.dock,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.dockBorder,
-    borderLeftWidth: 0,
-    borderRightWidth: 0,
-    borderBottomWidth: 0,
   },
   dockContent: {
-    paddingTop: 10,
-    paddingHorizontal: 16,
+    alignSelf: 'center',
+    width: '100%',
+    maxWidth: 540,
+    gap: 8,
   },
   miniPlayerGlass: {
     borderRadius: 16,
-    marginBottom: 1,
   },
   miniPlayerContent: {
     minHeight: 58,
@@ -4240,42 +4585,6 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     backgroundColor: COLORS.accent,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  miniPlayIcon: {
-    color: COLORS.ink,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  noTrackDock: {
-    height: 44,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-  },
-  noTrackSymbol: {
-    color: COLORS.accent,
-    fontSize: 17,
-  },
-  noTrackText: {
-    color: COLORS.secondaryText,
-    fontSize: 8,
-    fontWeight: '800',
-    letterSpacing: 1.7,
-  },
-  noTrackMark: {
-    position: 'absolute',
-    right: 4,
-    color: COLORS.muted,
-    fontSize: 10,
-    fontWeight: '800',
-  },
-  dockCaption: {
-    color: COLORS.muted,
-    fontSize: 7,
-    textAlign: 'center',
-    letterSpacing: 1.6,
-    marginTop: 8,
   },
   playerScreen: {
     flex: 1,
