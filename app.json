@@ -22,7 +22,10 @@
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
-        "android.permission.POST_NOTIFICATIONS"
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.INTERNET"
       ],
       "package": "com.anonymous.soundroomlocalplayer"
     },
@@ -53,6 +56,11 @@
           "supportsOpeningDocumentsInPlace": true
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "9be81174-364f-4977-901e-3def3144d492"
+      }
+    }
   }
 }
