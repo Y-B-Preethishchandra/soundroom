@@ -2916,6 +2916,7 @@ function MusicPlayer() {
         assets,
         'folder',
         { copiedFiles: [], savedWebFiles: [], createdWebUrls: [] },
+        { copyToAppStorage: false },
       );
     } catch (error) {
       if (!isPickerCancelled(error)) {
