@@ -4140,7 +4140,7 @@ function MusicPlayer() {
             >
               <DockIcon
                 name={activeBrowseMode.icon}
-                color={isBrowseSelected ? COLORS.accent : COLORS.secondaryText}
+                color={isBrowseSelected ? COLORS.dockSelectedText : COLORS.dockText}
               />
               <Text
                 numberOfLines={1}
@@ -4171,7 +4171,7 @@ function MusicPlayer() {
               <DockIcon
                 name="playlists"
                 color={
-                  isPlaylistsSelected ? COLORS.accent : COLORS.secondaryText
+                  isPlaylistsSelected ? COLORS.dockSelectedText : COLORS.dockText
                 }
               />
               <Text
@@ -4199,7 +4199,7 @@ function MusicPlayer() {
             >
               <DockIcon
                 name="settings"
-                color={isSettingsOpen ? COLORS.accent : COLORS.secondaryText}
+                color={isSettingsOpen ? COLORS.dockSelectedText : COLORS.dockText}
               />
               <Text
                 numberOfLines={1}
@@ -5148,12 +5148,12 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     backgroundColor: COLORS.selectedSurface,
   },
   browseTabText: {
-    color: COLORS.secondaryText,
+    color: COLORS.dockText,
     fontSize: 8,
     fontWeight: '700',
   },
   browseTabTextSelected: {
-    color: COLORS.accent,
+    color: COLORS.dockSelectedText,
   },
   libraryHeading: {
     flexDirection: 'row',

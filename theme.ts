@@ -19,6 +19,8 @@ export type ThemeColors = {
   glassHighlight: string;
   dock: string;
   dockBorder: string;
+  dockText: string;
+  dockSelectedText: string;
   sheet: string;
   backdrop: string;
   noticeText: string;
@@ -47,6 +49,8 @@ export const THEME_COLORS: Record<ThemeMode, ThemeColors> = {
     glassHighlight: 'rgba(255,255,255,0.42)',
     dock: 'rgba(13,15,13,0.48)',
     dockBorder: 'rgba(255,255,255,0.13)',
+    dockText: '#A5A79D',
+    dockSelectedText: '#D6F36A',
     sheet: '#191B17',
     backdrop: 'rgba(0,0,0,0.64)',
     noticeText: '#E4E9D1',
@@ -73,6 +77,8 @@ export const THEME_COLORS: Record<ThemeMode, ThemeColors> = {
     glassHighlight: 'rgba(255,255,255,0.88)',
     dock: 'rgba(250,250,246,0.84)',
     dockBorder: 'rgba(32,35,27,0.12)',
+    dockText: '#3E4137',
+    dockSelectedText: '#405800',
     sheet: '#FFFFFF',
     backdrop: 'rgba(25,28,21,0.38)',
     noticeText: '#333A24',
