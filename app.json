@@ -36,6 +36,7 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      "expo-background-task",
       [
         "react-native-audio-api",
         {

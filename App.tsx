@@ -27,6 +27,7 @@ import {
   type ComponentRef,
 } from 'react';
 import {
+  AppState,
   ActivityIndicator,
   Alert,
   FlatList,
@@ -54,6 +55,17 @@ import EqualizerSheet, {
   type EqualizerSettings,
 } from './EqualizerSheet';
 import GlassSurface from './GlassSurface';
+import {
+  MUSIC_AI_ENABLED_KEY,
+  MUSIC_LIBRARY_KEY,
+  MUSIC_PLAYLISTS_KEY,
+  processPendingMusicAiTracks,
+} from './musicAi';
+import {
+  registerMusicAiBackgroundTask,
+  unregisterMusicAiBackgroundTask,
+} from './musicAiBackground';
+import type { MusicAiTag } from './musicAiTypes';
 import { THEME_COLORS, type ThemeColors, type ThemeMode } from './theme';
 import {
   isWebTrackUri,
@@ -99,6 +111,9 @@ type Track = {
   composer?: string;
   genre?: string;
   metadataLoaded?: boolean;
+  aiTags?: MusicAiTag[];
+  aiAnalyzedAt?: number;
+  aiError?: string;
   addedAt: number;
 };
 
@@ -332,7 +347,15 @@ class ExpoFileReader extends MediaFileReader {
   }
 }
 
-type BrowseMode = 'songs' | 'albums' | 'artists' | 'composers' | 'genres' | 'playlists';
+type BrowseMode =
+  | 'songs'
+  | 'albums'
+  | 'artists'
+  | 'composers'
+  | 'genres'
+  | 'moods'
+  | 'themes'
+  | 'playlists';
 type CollectionMode = Exclude<BrowseMode, 'songs' | 'playlists'>;
 type SortMode =
   | 'name'
@@ -345,8 +368,7 @@ type SortMode =
   | 'track'
   | 'disc'
   | 'bpm'
-  | 'newest'
-  | 'oldest'
+  | 'dateAdded'
   | `metadata:${string}`;
 
 type LibraryGroup = {
@@ -367,6 +389,7 @@ type Playlist = {
   trackIds: string[];
   createdAt: number;
   updatedAt: number;
+  generatedByAi?: boolean;
 };
 
 type LibraryListItem =
@@ -393,6 +416,8 @@ const BROWSE_MODES: { id: BrowseMode; label: string; icon: DockIconName }[] = [
   { id: 'artists', label: 'Artists', icon: 'artists' },
   { id: 'composers', label: 'Composers', icon: 'composers' },
   { id: 'genres', label: 'Genres', icon: 'genres' },
+  { id: 'moods', label: 'Moods', icon: 'genres' },
+  { id: 'themes', label: 'Themes', icon: 'genres' },
   { id: 'playlists', label: 'Playlists', icon: 'playlists' },
 ];
 const BROWSE_MENU_MODES = BROWSE_MODES.filter((mode) => mode.id !== 'playlists');
@@ -755,8 +780,7 @@ const SORT_OPTIONS: { id: SortMode; label: string }[] = [
   { id: 'track', label: 'Track' },
   { id: 'disc', label: 'Disc' },
   { id: 'bpm', label: 'BPM' },
-  { id: 'newest', label: 'Recently added' },
-  { id: 'oldest', label: 'Oldest added' },
+  { id: 'dateAdded', label: 'Date added' },
 ];
 const METADATA_COLLATOR = new Intl.Collator(undefined, {
   numeric: true,
@@ -783,6 +807,18 @@ function isTrack(value: unknown): value is Track {
     (track.composer === undefined || typeof track.composer === 'string') &&
     (track.genre === undefined || typeof track.genre === 'string') &&
     (track.metadataLoaded === undefined || typeof track.metadataLoaded === 'boolean') &&
+    (track.aiTags === undefined ||
+      (Array.isArray(track.aiTags) &&
+        track.aiTags.every(
+          (tag) =>
+            typeof tag === 'object' &&
+            tag !== null &&
+            (tag.category === 'genre' || tag.category === 'mood' || tag.category === 'theme') &&
+            typeof tag.label === 'string' &&
+            typeof tag.score === 'number',
+        ))) &&
+    (track.aiAnalyzedAt === undefined || typeof track.aiAnalyzedAt === 'number') &&
+    (track.aiError === undefined || typeof track.aiError === 'string') &&
     typeof track.addedAt === 'number'
   );
 }
@@ -796,7 +832,8 @@ function isPlaylist(value: unknown): value is Playlist {
     Array.isArray(playlist.trackIds) &&
     playlist.trackIds.every((id) => typeof id === 'string') &&
     typeof playlist.createdAt === 'number' &&
-    typeof playlist.updatedAt === 'number'
+    typeof playlist.updatedAt === 'number' &&
+    (playlist.generatedByAi === undefined || typeof playlist.generatedByAi === 'boolean')
   );
 }
 
@@ -1034,14 +1071,36 @@ function readAudioTags(file: Blob): Promise<ParsedAudioTags> {
 }
 
 function groupDetails(track: Track, mode: CollectionMode) {
-  const title =
-    mode === 'albums'
-      ? track.album?.trim() || 'Unknown album'
-      : mode === 'artists'
-        ? track.artist.trim() || 'Unknown artist'
-        : mode === 'composers'
-          ? track.composer?.trim() || 'Unknown composer'
-          : track.genre?.trim() || 'Unknown genre';
+  const aiCategory =
+    mode === 'genres'
+      ? 'genre'
+      : mode === 'moods'
+        ? 'mood'
+        : mode === 'themes'
+          ? 'theme'
+          : null;
+  const aiTag =
+    aiCategory &&
+    track.aiTags
+      ?.filter((tag) => tag.category === aiCategory)
+      .sort((first, second) => second.score - first.score)[0];
+  if ((mode === 'moods' || mode === 'themes') && !aiTag) return null;
+
+  const title = (() => {
+    switch (mode) {
+      case 'albums':
+        return track.album?.trim() || 'Unknown album';
+      case 'artists':
+        return track.artist.trim() || 'Unknown artist';
+      case 'composers':
+        return track.composer?.trim() || 'Unknown composer';
+      case 'genres':
+        return aiTag?.label || track.genre?.trim() || 'Unknown genre';
+      case 'moods':
+      case 'themes':
+        return aiTag?.label ?? '';
+    }
+  })();
   const albumArtist = track.albumArtist?.trim() || track.artist.trim() || 'Unknown artist';
   const identity =
     mode === 'albums'
@@ -1071,7 +1130,11 @@ function trackSortValue(track: Track, sortMode: SortMode) {
     case 'composer':
       return track.composer ?? '';
     case 'genre':
-      return track.genre ?? '';
+      return (
+        track.aiTags?.find((tag) => tag.category === 'genre')?.label ??
+        track.genre ??
+        ''
+      );
     case 'year':
       return track.metadata?.Date ?? '';
     case 'track':
@@ -1080,8 +1143,7 @@ function trackSortValue(track: Track, sortMode: SortMode) {
       return track.metadata?.Disc ?? '';
     case 'bpm':
       return track.metadata?.BPM ?? '';
-    case 'newest':
-    case 'oldest':
+    case 'dateAdded':
       return '';
     default:
       return track.metadata?.[sortMode] ?? '';
@@ -1096,7 +1158,7 @@ function groupSortValue(
   if (sortMode.startsWith('metadata:')) {
     return group.metadata[sortMode.slice('metadata:'.length)] ?? group.title;
   }
-  if (sortMode === 'newest' || sortMode === 'oldest') return '';
+  if (sortMode === 'dateAdded') return '';
   if (sortMode === 'name') return group.title;
   if (sortMode === 'artist' && browseMode === 'albums') return group.subtitle;
   const fieldBySortMode: Partial<Record<SortMode, string>> = {
@@ -1323,6 +1385,9 @@ function MusicPlayer() {
   const playerArtworkSize = Math.min(screenWidth - 60, 340);
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [themeReady, setThemeReady] = useState(false);
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [aiSettingsReady, setAiSettingsReady] = useState(false);
+  const [isAiAnalyzing, setIsAiAnalyzing] = useState(false);
   const isLightTheme = theme === 'light';
   const COLORS = THEME_COLORS[theme];
   const styles = useMemo(
@@ -1357,6 +1422,9 @@ function MusicPlayer() {
   const [browseMode, setBrowseMode] = useState<BrowseMode>('songs');
   const [isBrowseMenuOpen, setIsBrowseMenuOpen] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>('name');
+  const [sortDirection, setSortDirection] = useState<'ascending' | 'descending'>(
+    'ascending',
+  );
   const [selectedGroup, setSelectedGroup] = useState<LibraryGroup | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isImporting, setIsImporting] = useState(false);
@@ -1364,6 +1432,11 @@ function MusicPlayer() {
   const [dropFolderReady, setDropFolderReady] = useState(false);
   const [ignoredDropSources, setIgnoredDropSources] = useState<string[]>([]);
   const [isScanningDropFolder, setIsScanningDropFolder] = useState(false);
+  const [dropFolderScanProgress, setDropFolderScanProgress] = useState<{
+    phase: 'scanning' | 'importing';
+    found: number;
+    processed: number;
+  } | null>(null);
   const [dropFolderScanRequest, setDropFolderScanRequest] = useState(0);
   const [isPlayerOpen, setIsPlayerOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -1379,6 +1452,7 @@ function MusicPlayer() {
   const [isRepeating, setIsRepeating] = useState(false);
   const [notice, setNotice] = useState('');
   const tracksRef = useRef<Track[]>([]);
+  const handledDropFolderScanRequest = useRef(0);
   const notificationPermissionRequested = useRef(false);
   const webObjectUrls = useRef(new Set<string>());
   const notificationActions = useRef({
@@ -1474,6 +1548,23 @@ function MusicPlayer() {
 
   useEffect(() => {
     let active = true;
+    AsyncStorage.getItem(MUSIC_AI_ENABLED_KEY)
+      .then((saved) => {
+        if (active) setAiEnabled(saved === 'true');
+      })
+      .catch((error: unknown) => {
+        if (active) setNotice(`Could not load AI feature setting: ${errorMessage(error)}`);
+      })
+      .finally(() => {
+        if (active) setAiSettingsReady(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
     Promise.all([
       AsyncStorage.getItem(DROP_FOLDER_KEY),
       AsyncStorage.getItem(IGNORED_DROP_SOURCES_KEY),
@@ -1547,6 +1638,9 @@ function MusicPlayer() {
         track.albumArtist?.toLocaleLowerCase().includes(query) ||
         track.composer?.toLocaleLowerCase().includes(query) ||
         track.genre?.toLocaleLowerCase().includes(query) ||
+        track.aiTags?.some(({ category, label }) =>
+          `${category} ${label}`.toLocaleLowerCase().includes(query),
+        ) ||
         track.fileName.toLocaleLowerCase().includes(query) ||
         Object.entries(track.metadata ?? {}).some(([field, value]) =>
           `${field} ${value}`.toLocaleLowerCase().includes(query),
@@ -1565,6 +1659,7 @@ function MusicPlayer() {
     const groups = new Map<string, LibraryGroup>();
     for (const track of visibleTracks) {
       const details = groupDetails(track, browseMode);
+      if (!details) continue;
       const existing = groups.get(details.id);
       if (existing) {
         existing.count += 1;
@@ -1593,22 +1688,17 @@ function MusicPlayer() {
       unsortedGroups
         .map((group) => ({
           group,
-          sortValue:
-            sortMode === 'newest' || sortMode === 'oldest'
-              ? ''
-              : groupSortValue(group, sortMode, browseMode),
+          sortValue: groupSortValue(group, sortMode, browseMode),
         }))
         .sort((first, second) => {
-          if (sortMode === 'newest') {
-            return second.group.newestAddedAt - first.group.newestAddedAt;
-          }
-          if (sortMode === 'oldest') {
-            return first.group.oldestAddedAt - second.group.oldestAddedAt;
-          }
-          return compareMetadataValues(first.sortValue, second.sortValue);
+          const comparison =
+            sortMode === 'dateAdded'
+              ? first.group.newestAddedAt - second.group.newestAddedAt
+              : compareMetadataValues(first.sortValue, second.sortValue);
+          return comparison * (sortDirection === 'ascending' ? 1 : -1);
         })
         .map(({ group }) => group),
-    [browseMode, sortMode, unsortedGroups],
+    [browseMode, sortDirection, sortMode, unsortedGroups],
   );
 
   const listingGroups =
@@ -1624,7 +1714,7 @@ function MusicPlayer() {
       if (selectedGroup && browseMode !== 'songs' && browseMode !== 'playlists') {
         const collectionMode: CollectionMode = browseMode;
         return visibleTracks.filter(
-          (track) => groupDetails(track, collectionMode).id === selectedGroup.id,
+          (track) => groupDetails(track, collectionMode)?.id === selectedGroup.id,
         );
       }
       return visibleTracks;
@@ -1632,35 +1722,39 @@ function MusicPlayer() {
     [browseMode, playlists, selectedGroup, selectedPlaylistId, visibleTracks],
   );
   const sortedTracks = useMemo(() => {
-    const newestFirst = sortMode === 'newest';
-    const oldestFirst = sortMode === 'oldest';
     return tracksForList
       .map((track) => ({
         track,
-        sortValue: newestFirst || oldestFirst ? '' : trackSortValue(track, sortMode),
+        sortValue: trackSortValue(track, sortMode),
       }))
       .sort((first, second) => {
-        if (newestFirst) return second.track.addedAt - first.track.addedAt;
-        if (oldestFirst) return first.track.addedAt - second.track.addedAt;
-        const primary = compareMetadataValues(first.sortValue, second.sortValue);
-        return primary || compareMetadataValues(first.track.title, second.track.title);
+        const comparison =
+          sortMode === 'dateAdded'
+            ? first.track.addedAt - second.track.addedAt
+            : compareMetadataValues(first.sortValue, second.sortValue) ||
+              compareMetadataValues(first.track.title, second.track.title);
+        return comparison * (sortDirection === 'ascending' ? 1 : -1);
       })
       .map(({ track }) => track);
-  }, [sortMode, tracksForList]);
+  }, [sortDirection, sortMode, tracksForList]);
   const selectedPlaylist = playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? null;
   const listingPlaylists = browseMode === 'playlists' && selectedPlaylist === null;
+  const aiAnalyzedCount = tracks.filter(
+    (track) => track.aiAnalyzedAt !== undefined && !track.aiError,
+  ).length;
+  const aiFailedCount = tracks.filter((track) => track.aiError !== undefined).length;
   const visiblePlaylists = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     return playlists
       .filter((playlist) => !query || playlist.name.toLocaleLowerCase().includes(query))
-      .sort((first, second) =>
-        sortMode === 'newest'
-          ? second.createdAt - first.createdAt
-          : sortMode === 'oldest'
+      .sort((first, second) => {
+        const comparison =
+          sortMode === 'dateAdded'
             ? first.createdAt - second.createdAt
-            : compareMetadataValues(first.name, second.name),
-      );
-  }, [playlists, search, sortMode]);
+            : compareMetadataValues(first.name, second.name);
+        return comparison * (sortDirection === 'ascending' ? 1 : -1);
+      });
+  }, [playlists, search, sortDirection, sortMode]);
   const libraryItems = useMemo<LibraryListItem[]>(
     () => {
       if (listingPlaylists) {
@@ -1671,6 +1765,21 @@ function MusicPlayer() {
     },
     [groupedLibrary, listingGroups, listingPlaylists, sortedTracks, visiblePlaylists],
   );
+  const pendingAiTrackIds = tracks
+    .filter((track) => track.aiAnalyzedAt === undefined && !track.aiError)
+    .map((track) => track.id)
+    .join('|');
+
+  useEffect(() => {
+    if (!aiSettingsReady || Platform.OS === 'web') return;
+    const updateBackgroundSchedule = aiEnabled && pendingAiTrackIds
+      ? registerMusicAiBackgroundTask
+      : unregisterMusicAiBackgroundTask;
+    void updateBackgroundSchedule().catch((error: unknown) => {
+      setNotice(`Could not update AI background scheduling: ${errorMessage(error)}`);
+    });
+  }, [aiEnabled, aiSettingsReady, pendingAiTrackIds]);
+
   useEffect(() => {
     let active = true;
 
@@ -1785,6 +1894,129 @@ function MusicPlayer() {
       active = false;
     };
   }, [makeWebObjectUrl, saveLibrary]);
+
+  useEffect(() => {
+    if (
+      !aiEnabled ||
+      !aiSettingsReady ||
+      Platform.OS === 'web' ||
+      isLoading ||
+      !playlistsReady ||
+      !pendingAiTrackIds
+    ) {
+      return;
+    }
+
+    let active = true;
+    void Promise.resolve()
+      .then(() => {
+        if (!active) return undefined;
+        setIsAiAnalyzing(true);
+        return processPendingMusicAiTracks(1);
+      })
+      .then(async (result) => {
+        if (!active || !result || result.processedCount === 0) return;
+        const updatesById = new Map(result.tracks.map((track) => [track.id, track]));
+        const updatedTracks = tracksRef.current.map((track) => {
+          const analyzedTrack = updatesById.get(track.id);
+          if (!analyzedTrack || analyzedTrack.aiAnalyzedAt === undefined) return track;
+          const updatedTrack: Track = {
+            ...track,
+            aiTags: analyzedTrack.aiTags ?? [],
+            aiAnalyzedAt: analyzedTrack.aiAnalyzedAt,
+          };
+          if (analyzedTrack.aiError) updatedTrack.aiError = analyzedTrack.aiError;
+          else delete updatedTrack.aiError;
+          return updatedTrack;
+        });
+        await saveLibrary(updatedTracks);
+        if (!active) return;
+        setTracks(updatedTracks);
+        setPlaylists(result.playlists);
+        if (result.failedCount > 0) {
+          setNotice(
+            `AI analysis could not read ${result.failedCount} audio ${
+              result.failedCount === 1 ? 'file' : 'files'
+            }. Other songs will continue to be analyzed.`,
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        if (active) setNotice(`Could not analyze music: ${errorMessage(error)}`);
+      })
+      .finally(() => {
+        if (active) setIsAiAnalyzing(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [
+    aiEnabled,
+    aiSettingsReady,
+    isLoading,
+    pendingAiTrackIds,
+    playlistsReady,
+    saveLibrary,
+  ]);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    let active = true;
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return;
+      void (async () => {
+        const [savedLibrary, savedPlaylists] = await Promise.all([
+          AsyncStorage.getItem(MUSIC_LIBRARY_KEY),
+          AsyncStorage.getItem(MUSIC_PLAYLISTS_KEY),
+        ]);
+        const parsedLibrary: unknown = savedLibrary ? JSON.parse(savedLibrary) : [];
+        const parsedPlaylists: unknown = savedPlaylists ? JSON.parse(savedPlaylists) : [];
+        if (!Array.isArray(parsedLibrary) || !parsedLibrary.every(isTrack)) {
+          throw new Error('The saved music library could not be refreshed.');
+        }
+        if (!Array.isArray(parsedPlaylists) || !parsedPlaylists.every(isPlaylist)) {
+          throw new Error('The saved playlists could not be refreshed.');
+        }
+        if (!active) return;
+
+        const savedTracksById = new Map(parsedLibrary.map((track) => [track.id, track]));
+        setTracks((currentTracks) =>
+          currentTracks.map((track) => {
+            const savedTrack = savedTracksById.get(track.id);
+            if (
+              !savedTrack ||
+              savedTrack.aiAnalyzedAt === undefined ||
+              (track.aiAnalyzedAt !== undefined &&
+                track.aiAnalyzedAt >= savedTrack.aiAnalyzedAt)
+            ) {
+              return track;
+            }
+            const refreshedTrack: Track = {
+              ...track,
+              aiTags: savedTrack.aiTags ?? [],
+              aiAnalyzedAt: savedTrack.aiAnalyzedAt,
+            };
+            if (savedTrack.aiError) refreshedTrack.aiError = savedTrack.aiError;
+            else delete refreshedTrack.aiError;
+            return refreshedTrack;
+          }),
+        );
+        setPlaylists((currentPlaylists) => [
+          ...currentPlaylists.filter((playlist) => !playlist.generatedByAi),
+          ...parsedPlaylists.filter((playlist) => playlist.generatedByAi),
+        ]);
+      })().catch((error: unknown) => {
+        if (active) {
+          setNotice(`Could not refresh background music analysis: ${errorMessage(error)}`);
+        }
+      });
+    });
+    return () => {
+      active = false;
+      subscription.remove();
+    };
+  }, []);
 
   const changeEqualizerSettings = useCallback((settings: EqualizerSettings) => {
     try {
@@ -2231,7 +2463,12 @@ function MusicPlayer() {
     {
       showNotice = true,
       copyToAppStorage = true,
-    }: { showNotice?: boolean; copyToAppStorage?: boolean } = {},
+      onProgress,
+    }: {
+      showNotice?: boolean;
+      copyToAppStorage?: boolean;
+      onProgress?: (processed: number, total: number) => void;
+    } = {},
   ) => {
     const knownSourceUris = new Set(
       tracksRef.current.flatMap((track) => [track.sourceUri, track.uri].filter(Boolean) as string[]),
@@ -2341,13 +2578,17 @@ function MusicPlayer() {
             );
           }
         }
+        onProgress?.(assetIndex + 1, audioAssets.length);
         continue;
       }
 
       const metadataFile = Platform.OS === 'web'
         ? asset.file
         : copiedFile ?? (asset.uri ? new File(asset.uri) : null);
-      if (!metadataFile) continue;
+      if (!metadataFile) {
+        onProgress?.(assetIndex + 1, audioAssets.length);
+        continue;
+      }
 
       try {
         const metadata = await readTrackMetadata(
@@ -2371,6 +2612,7 @@ function MusicPlayer() {
           `Could not read audio tags for ${asset.name}: ${errorMessage(error)}`,
         );
       }
+      onProgress?.(assetIndex + 1, audioAssets.length);
     }
 
     if (importedTracks.length > 0) {
@@ -2419,6 +2661,43 @@ function MusicPlayer() {
     }
     return { importedCount: importedTracks.length, failedCount: importFailures };
   }, [makeWebObjectUrl, saveLibrary]);
+
+  const toggleAiFeatures = async () => {
+    if (!aiSettingsReady || Platform.OS === 'web') return;
+    const enabled = !aiEnabled;
+    try {
+      await AsyncStorage.setItem(MUSIC_AI_ENABLED_KEY, enabled ? 'true' : 'false');
+      setAiEnabled(enabled);
+      if (!enabled) setIsAiAnalyzing(false);
+      setNotice(enabled ? 'On-device music analysis enabled.' : 'AI music analysis disabled.');
+    } catch (error) {
+      setNotice(`Could not save AI feature setting: ${errorMessage(error)}`);
+    }
+  };
+
+  const retryFailedAiAnalysis = async () => {
+    if (!aiEnabled || aiFailedCount === 0) return;
+    const retriedTracks = tracks.map((track) => {
+      if (!track.aiError) return track;
+      const updatedTrack = { ...track };
+      delete updatedTrack.aiError;
+      delete updatedTrack.aiTags;
+      delete updatedTrack.aiAnalyzedAt;
+      return updatedTrack;
+    });
+    try {
+      await saveLibrary(retriedTracks);
+      tracksRef.current = retriedTracks;
+      setTracks(retriedTracks);
+      setNotice(
+        `Retrying AI analysis for ${aiFailedCount} ${
+          aiFailedCount === 1 ? 'song' : 'songs'
+        }.`,
+      );
+    } catch (error) {
+      setNotice(`Could not retry AI analysis: ${errorMessage(error)}`);
+    }
+  };
 
   const importSongs = async () => {
     setIsImporting(true);
@@ -2591,6 +2870,12 @@ function MusicPlayer() {
   useEffect(() => {
     if (Platform.OS === 'web' || isLoading || !dropFolderReady) return;
 
+    const isManualScan = dropFolderScanRequest > handledDropFolderScanRequest.current;
+    if (isManualScan) {
+      handledDropFolderScanRequest.current = dropFolderScanRequest;
+      setDropFolderScanProgress({ phase: 'scanning', found: 0, processed: 0 });
+    }
+
     let active = true;
     const scanDropFolder = async () => {
       setIsScanningDropFolder(true);
@@ -2633,6 +2918,13 @@ function MusicPlayer() {
                 continue;
               }
               knownSourceUris.add(entry.uri);
+              if (isManualScan) {
+                setDropFolderScanProgress((progress) =>
+                  progress
+                    ? { ...progress, found: progress.found + 1 }
+                    : progress,
+                );
+              }
 
               const cleanup = {
                 copiedFiles: [] as File[],
@@ -2648,7 +2940,22 @@ function MusicPlayer() {
                   }],
                   'folder',
                   cleanup,
-                  { showNotice: false },
+                  {
+                    showNotice: false,
+                    onProgress: () => {
+                      if (isManualScan) {
+                        setDropFolderScanProgress((progress) =>
+                          progress
+                            ? {
+                                ...progress,
+                                phase: 'importing',
+                                processed: progress.processed + 1,
+                              }
+                            : progress,
+                        );
+                      }
+                    },
+                  },
                 );
                 importedCount += result.importedCount;
                 failedCount += result.failedCount;
@@ -2657,6 +2964,17 @@ function MusicPlayer() {
                 firstImportError ||= `${entry.name}: ${errorMessage(error)}`;
                 for (const file of cleanup.copiedFiles) {
                   if (file.exists) file.delete();
+                }
+                if (isManualScan) {
+                  setDropFolderScanProgress((progress) =>
+                    progress
+                      ? {
+                          ...progress,
+                          phase: 'importing',
+                          processed: progress.processed + 1,
+                        }
+                      : progress,
+                  );
                 }
                 if (!active) return;
               }
@@ -2667,6 +2985,7 @@ function MusicPlayer() {
         if (active && (importedCount > 0 || failedCount > 0)) {
           setNotice(
             [
+              isManualScan ? 'Folder scan complete.' : '',
               importedCount > 0
                 ? `${importedCount} new ${
                     importedCount === 1 ? 'song was' : 'songs were'
@@ -2681,13 +3000,18 @@ function MusicPlayer() {
               .filter(Boolean)
               .join(' '),
           );
+        } else if (active && isManualScan) {
+          setNotice('Folder scan complete. No new audio files were found.');
         }
       } catch (error) {
         if (active) {
           setNotice(`Could not scan music drop folder: ${errorMessage(error)}`);
         }
       } finally {
-        if (active) setIsScanningDropFolder(false);
+        if (active) {
+          setIsScanningDropFolder(false);
+          if (isManualScan) setDropFolderScanProgress(null);
+        }
       }
     };
 
@@ -2998,29 +3322,34 @@ function MusicPlayer() {
           <View style={styles.trackInfo}>
             <Text numberOfLines={1} style={styles.trackTitle}>{playlist.name}</Text>
             <Text numberOfLines={1} style={styles.trackArtist}>
+              {playlist.generatedByAi ? 'AI-generated · ' : ''}
               {playlistTracks.length} {playlistTracks.length === 1 ? 'song' : 'songs'}
             </Text>
           </View>
           <Text style={styles.groupArrow}>›</Text>
         </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Rename playlist ${playlist.name}`}
-          onPress={() => openPlaylistEditor(playlist)}
-          hitSlop={8}
-          style={styles.playlistManageButton}
-        >
-          <Text style={styles.playlistManageText}>✎</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Delete playlist ${playlist.name}`}
-          onPress={() => deletePlaylist(playlist)}
-          hitSlop={8}
-          style={styles.removeButton}
-        >
-          <Text style={styles.removeButtonText}>×</Text>
-        </Pressable>
+        {!playlist.generatedByAi && (
+          <>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Rename playlist ${playlist.name}`}
+              onPress={() => openPlaylistEditor(playlist)}
+              hitSlop={8}
+              style={styles.playlistManageButton}
+            >
+              <Text style={styles.playlistManageText}>✎</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Delete playlist ${playlist.name}`}
+              onPress={() => deletePlaylist(playlist)}
+              hitSlop={8}
+              style={styles.removeButton}
+            >
+              <Text style={styles.removeButtonText}>×</Text>
+            </Pressable>
+          </>
+        )}
       </GlassSurface>
     );
   };
@@ -3031,6 +3360,8 @@ function MusicPlayer() {
     'Songs';
   const activeBrowseMode =
     BROWSE_MODES.find((mode) => mode.id === browseMode) ?? BROWSE_MODES[0];
+  const isBrowseSelected = !isSettingsOpen && browseMode !== 'playlists';
+  const isPlaylistsSelected = !isSettingsOpen && browseMode === 'playlists';
   const currentCount = listingPlaylists
     ? visiblePlaylists.length
     : listingGroups
@@ -3060,7 +3391,7 @@ function MusicPlayer() {
   ];
   const sortOptionsForView = listingPlaylists
     ? SORT_OPTIONS.filter(
-        (option) => option.id === 'name' || option.id === 'newest' || option.id === 'oldest',
+        (option) => option.id === 'name' || option.id === 'dateAdded',
       )
     : availableSortOptions;
 
@@ -3143,6 +3474,7 @@ function MusicPlayer() {
           <ScrollView
             contentContainerStyle={styles.sortOptions}
             horizontal
+            style={styles.sortOptionsScroller}
             showsHorizontalScrollIndicator={false}
           >
             {sortOptionsForView.map((option) => {
@@ -3168,6 +3500,27 @@ function MusicPlayer() {
               );
             })}
           </ScrollView>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Sort ${sortDirection}`}
+            accessibilityHint="Changes the sort order between ascending and descending."
+            onPress={() =>
+              setSortDirection((direction) =>
+                direction === 'ascending' ? 'descending' : 'ascending',
+              )
+            }
+            style={({ pressed }) => [
+              styles.sortDirectionButton,
+              pressed && styles.sortChipPressed,
+            ]}
+          >
+            <Text style={styles.sortDirectionArrow}>
+              {sortDirection === 'ascending' ? '↑' : '↓'}
+            </Text>
+            <Text style={styles.sortDirectionText}>
+              {sortDirection === 'ascending' ? 'ASC' : 'DESC'}
+            </Text>
+          </Pressable>
         </View>
       )}
 
@@ -3287,24 +3640,81 @@ function MusicPlayer() {
               </View>
               <View style={styles.settingsDivider} />
               <Text style={styles.eyebrow}>FEATURES</Text>
-              <Pressable
-                accessibilityRole="switch"
-                accessibilityLabel="AI features"
-                accessibilityState={{ checked: false, disabled: true }}
-                disabled
-                style={[styles.settingRow, styles.buttonDisabled]}
-              >
-                <View style={styles.settingCopy}>
-                  <Text style={styles.settingTitle}>AI features</Text>
-                  <Text style={styles.settingDescription}>
-                    Enable or disable AI-powered features.
-                  </Text>
+              {Platform.OS === 'web' ? (
+                <View style={styles.settingRow}>
+                  <View style={styles.settingCopy}>
+                    <Text style={styles.settingTitle}>AI features</Text>
+                    <Text style={styles.settingDescription}>
+                      On-device music analysis is available in the iOS and Android apps.
+                    </Text>
+                  </View>
                 </View>
-                <View style={styles.settingSwitch}>
-                  <View style={styles.settingSwitchKnob} />
-                </View>
-              </Pressable>
-              <Text style={styles.settingsNote}>AI features are unavailable for now.</Text>
+              ) : (
+                <Pressable
+                  accessibilityRole="switch"
+                  accessibilityLabel="AI features"
+                  accessibilityState={{
+                    checked: aiEnabled,
+                    disabled: !aiSettingsReady,
+                  }}
+                  disabled={!aiSettingsReady}
+                  onPress={() => void toggleAiFeatures()}
+                  style={[styles.settingRow, !aiSettingsReady && styles.buttonDisabled]}
+                >
+                  <View style={styles.settingCopy}>
+                    <Text style={styles.settingTitle}>AI features</Text>
+                    <Text style={styles.settingDescription}>
+                      On-device genre, mood, and theme suggestions.
+                    </Text>
+                  </View>
+                  <View
+                    style={[
+                      styles.settingSwitch,
+                      { backgroundColor: aiEnabled ? COLORS.accent : COLORS.controlBorder },
+                    ]}
+                  >
+                    <View
+                      style={[
+                        styles.settingSwitchKnob,
+                        {
+                          alignSelf: aiEnabled ? 'flex-end' : 'flex-start',
+                          backgroundColor: aiEnabled ? COLORS.ink : COLORS.primaryText,
+                        },
+                      ]}
+                    />
+                  </View>
+                </Pressable>
+              )}
+              {Platform.OS !== 'web' && (
+                <Text style={styles.settingsNote}>
+                  {aiEnabled
+                    ? `${aiAnalyzedCount} of ${tracks.length} songs analyzed${
+                        isAiAnalyzing ? ' · analyzing next song' : ''
+                      }${aiFailedCount > 0 ? ` · ${aiFailedCount} could not be read` : ''}.`
+                    : 'Off by default. Audio is analyzed on this device only.'}
+                </Text>
+              )}
+              {Platform.OS !== 'web' && aiEnabled && aiFailedCount > 0 && (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Retry analysis for ${aiFailedCount} failed songs`}
+                  disabled={isAiAnalyzing}
+                  onPress={() => void retryFailedAiAnalysis()}
+                  style={({ pressed }) => [
+                    styles.aiRetryButton,
+                    pressed && styles.buttonPressed,
+                    isAiAnalyzing && styles.buttonDisabled,
+                  ]}
+                >
+                  <Text style={styles.aiRetryButtonText}>Retry failed songs</Text>
+                </Pressable>
+              )}
+              {Platform.OS !== 'web' && aiEnabled && (
+                <Text style={styles.settingsNote}>
+                  OS background runs are best-effort. YAMNet provides general audio labels, not
+                  definitive music metadata.
+                </Text>
+              )}
             </GlassSurface>
             <GlassSurface
               light={isLightTheme}
@@ -3404,7 +3814,15 @@ function MusicPlayer() {
                     <>
                       <Text numberOfLines={1} style={styles.addMenuStatus}>
                         {isScanningDropFolder
-                          ? 'Scanning folder…'
+                          ? dropFolderScanProgress?.phase === 'importing'
+                            ? `Adding songs · ${dropFolderScanProgress.processed} of ${dropFolderScanProgress.found}`
+                            : dropFolderScanProgress
+                              ? `Scanning folder · ${dropFolderScanProgress.found} new ${
+                                  dropFolderScanProgress.found === 1
+                                    ? 'audio file'
+                                    : 'audio files'
+                                } found`
+                              : 'Scanning folder…'
                           : `Connected · ${new Directory(dropFolderUri).name}`}
                       </Text>
                       <Pressable
@@ -3414,7 +3832,14 @@ function MusicPlayer() {
                           disabled: isScanningDropFolder || isLoading,
                         }}
                         disabled={isScanningDropFolder || isLoading}
-                        onPress={() => setDropFolderScanRequest((request) => request + 1)}
+                        onPress={() => {
+                          setDropFolderScanProgress({
+                            phase: 'scanning',
+                            found: 0,
+                            processed: 0,
+                          });
+                          setDropFolderScanRequest((request) => request + 1);
+                        }}
                         style={({ pressed }) => [
                           styles.addMenuOption,
                           pressed && styles.buttonPressed,
@@ -3422,7 +3847,18 @@ function MusicPlayer() {
                             styles.buttonDisabled,
                         ]}
                       >
-                        <Text style={styles.addMenuOptionText}>Scan folder now</Text>
+                        {isScanningDropFolder ? (
+                          <View style={styles.scanButtonContent}>
+                            <ActivityIndicator size="small" color={COLORS.accent} />
+                            <Text style={styles.addMenuOptionText}>
+                              {dropFolderScanProgress?.phase === 'importing'
+                                ? 'Adding songs…'
+                                : 'Scanning…'}
+                            </Text>
+                          </View>
+                        ) : (
+                          <Text style={styles.addMenuOptionText}>Scan folder now</Text>
+                        )}
                       </Pressable>
                     </>
                   )}
@@ -3622,32 +4058,31 @@ function MusicPlayer() {
               accessibilityLabel={`Browse categories, current category ${activeBrowseMode.label}`}
               accessibilityState={{ expanded: isBrowseMenuOpen }}
               onPress={() => {
-                setIsSettingsOpen(false);
                 setIsBrowseMenuOpen((isOpen) => !isOpen);
               }}
               style={[
                 styles.browseTab,
-                isBrowseMenuOpen && styles.browseTabSelected,
+                isBrowseSelected && styles.browseTabSelected,
               ]}
             >
               <DockIcon
                 name={activeBrowseMode.icon}
-                color={isBrowseMenuOpen ? COLORS.accent : COLORS.secondaryText}
+                color={isBrowseSelected ? COLORS.accent : COLORS.secondaryText}
               />
               <Text
                 numberOfLines={1}
                 style={[
                   styles.browseTabText,
-                  isBrowseMenuOpen && styles.browseTabTextSelected,
+                  isBrowseSelected && styles.browseTabTextSelected,
                 ]}
               >
-                Browse
+                {isBrowseSelected ? activeBrowseMode.label : 'Browse'}
               </Text>
             </Pressable>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Playlists"
-              accessibilityState={{ selected: browseMode === 'playlists' }}
+              accessibilityState={{ selected: isPlaylistsSelected }}
               onPress={() => {
                 setIsBrowseMenuOpen(false);
                 setIsSettingsOpen(false);
@@ -3657,20 +4092,20 @@ function MusicPlayer() {
               }}
               style={[
                 styles.browseTab,
-                browseMode === 'playlists' && styles.browseTabSelected,
+                isPlaylistsSelected && styles.browseTabSelected,
               ]}
             >
               <DockIcon
                 name="playlists"
                 color={
-                  browseMode === 'playlists' ? COLORS.accent : COLORS.secondaryText
+                  isPlaylistsSelected ? COLORS.accent : COLORS.secondaryText
                 }
               />
               <Text
                 numberOfLines={1}
                 style={[
                   styles.browseTabText,
-                  browseMode === 'playlists' && styles.browseTabTextSelected,
+                  isPlaylistsSelected && styles.browseTabTextSelected,
                 ]}
               >
                 Playlists
@@ -4130,6 +4565,20 @@ function MusicPlayer() {
                     <Text selectable style={styles.metadataValue}>{value}</Text>
                   </View>
                 ))}
+              {detailsTrack?.aiAnalyzedAt !== undefined && (
+                <View style={styles.metadataRow}>
+                  <Text style={styles.metadataLabel}>AI tags</Text>
+                  <Text selectable style={styles.metadataValue}>
+                    {detailsTrack.aiError
+                      ? 'Could not analyze this audio file.'
+                      : detailsTrack.aiTags?.length
+                        ? detailsTrack.aiTags
+                            .map(({ category, label }) => `${category}: ${label}`)
+                            .join(' · ')
+                        : 'No confident tags found.'}
+                  </Text>
+                </View>
+              )}
             </ScrollView>
           </SafeAreaView>
         </View>
@@ -4180,12 +4629,13 @@ function MusicPlayer() {
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
             >
-              {playlists.length === 0 ? (
+              {playlists.every((playlist) => playlist.generatedByAi) ? (
                 <Text style={styles.playlistEmptyHint}>
-                  Create a playlist to keep songs together.
+                  Create a playlist to keep songs together. AI-generated playlists update
+                  automatically.
                 </Text>
               ) : (
-                playlists.map((playlist) => {
+                playlists.filter((playlist) => !playlist.generatedByAi).map((playlist) => {
                   const containsTrack = playlist.trackIds.includes(playlistTrack?.id ?? '');
                   return (
                     <Pressable
@@ -4504,6 +4954,19 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     lineHeight: 14,
     marginTop: -4,
   },
+  aiRetryButton: {
+    alignSelf: 'flex-start',
+    minHeight: 40,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: COLORS.selectedSurface,
+  },
+  aiRetryButtonText: {
+    color: COLORS.accent,
+    fontSize: 11,
+    fontWeight: '700',
+  },
   brandLockup: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -4587,6 +5050,11 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     fontSize: 10,
     paddingHorizontal: 12,
     paddingBottom: 3,
+  },
+  scanButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
   },
   browseTab: {
     flex: 1,
@@ -4700,6 +5168,34 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     alignItems: 'center',
     gap: 7,
     paddingRight: 22,
+  },
+  sortOptionsScroller: {
+    flex: 1,
+    minWidth: 0,
+  },
+  sortDirectionButton: {
+    minHeight: 29,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    marginRight: 12,
+    paddingHorizontal: 9,
+    borderRadius: 15,
+    backgroundColor: COLORS.selectedSurface,
+    borderWidth: 1,
+    borderColor: COLORS.selectedBorder,
+  },
+  sortDirectionArrow: {
+    color: COLORS.accent,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  sortDirectionText: {
+    color: COLORS.accent,
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 0.4,
   },
   sortChip: {
     minHeight: 29,
