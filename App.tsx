@@ -1860,8 +1860,15 @@ function MusicPlayer() {
             });
           }
         }
+        const migratedTracksById = new Map(
+          migratedTracks.map((track) => [track.id, track]),
+        );
+        const retainedTracks = validTracks.map(
+          (track) => migratedTracksById.get(track.id) ?? track,
+        );
+        const unavailableTrackCount = validTracks.length - availableTracks.length;
         if (active) {
-          setTracks(migratedTracks);
+          setTracks(retainedTracks);
           const libraryChanged = migratedTracks.some(
             (track) => {
               const savedTrack = parsed.find(
@@ -1873,13 +1880,15 @@ function MusicPlayer() {
                 savedTrack?.metadataVersion !== track.metadataVersion
               );
             },
-          ) || migratedTracks.length !== parsed.length;
+          ) || validTracks.length !== parsed.length;
           if (libraryChanged) {
-            await saveLibrary(migratedTracks);
+            await saveLibrary(retainedTracks);
           }
           const loadWarnings = [
-            ...(migratedTracks.length !== parsed.length
-              ? ['Some saved tracks were unavailable and have been removed from your library.']
+            ...(unavailableTrackCount > 0
+              ? [`${unavailableTrackCount} saved ${
+                  unavailableTrackCount === 1 ? 'song is' : 'songs are'
+                } currently inaccessible. They remain in your library; scan their folder again to restore access.`]
               : []),
             ...(metadataReadFailures.length > 0
               ? [`Tags could not be read for ${metadataReadFailures.length} saved ${
@@ -1891,7 +1900,9 @@ function MusicPlayer() {
             setNotice(loadWarnings.join(' '));
           }
           if (!active && Platform.OS === 'web') {
-            migratedTracks.forEach((track) => revokeWebObjectUrl(track.uri));
+            retainedTracks.forEach((track) => {
+              if (migratedTracksById.has(track.id)) revokeWebObjectUrl(track.uri);
+            });
           }
         }
       } catch (error) {
@@ -2513,13 +2524,24 @@ function MusicPlayer() {
       onProgress?: (processed: number, total: number) => void;
     } = {},
   ) => {
+    const unavailableTracksBySourceUri = new Map(
+      Platform.OS === 'web'
+        ? []
+        : tracksRef.current.flatMap((track) =>
+            track.sourceUri && !new File(track.uri).exists
+              ? [[track.sourceUri, track] as const]
+              : [],
+          ),
+    );
     const knownSourceUris = new Set(
       tracksRef.current.flatMap((track) => [track.sourceUri, track.uri].filter(Boolean) as string[]),
     );
     const audioAssets = assets.filter(
       (asset) =>
         isAudioAsset(asset) &&
-        (!asset.sourceUri || !knownSourceUris.has(asset.sourceUri)),
+        (!asset.sourceUri ||
+          !knownSourceUris.has(asset.sourceUri) ||
+          unavailableTracksBySourceUri.has(asset.sourceUri)),
     );
     if (audioAssets.length === 0) {
       if (showNotice) {
@@ -2545,8 +2567,11 @@ function MusicPlayer() {
     let metadataPersistenceError = '';
     for (const [assetIndex, asset] of audioAssets.entries()) {
       const fallback = trackDetails(asset.name);
-      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const addedAt = Date.now() + assetIndex;
+      const unavailableTrack = asset.sourceUri
+        ? unavailableTracksBySourceUri.get(asset.sourceUri)
+        : undefined;
+      const id = unavailableTrack?.id ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const addedAt = unavailableTrack?.addedAt ?? Date.now() + assetIndex;
       let savedWebAudioId: string | null = null;
       let createdWebUrl: string | null = null;
       let copiedFile: File | null = null;
@@ -2581,6 +2606,7 @@ function MusicPlayer() {
             trackUri = destination.uri;
           }
           importedTrack = {
+            ...unavailableTrack,
             id,
             uri: trackUri,
             fileName: asset.name,
@@ -2590,7 +2616,11 @@ function MusicPlayer() {
           };
         }
 
-        const updatedTracks = [...tracksRef.current, importedTrack];
+        const updatedTracks = unavailableTrack
+          ? tracksRef.current.map((track) =>
+              track.id === unavailableTrack.id ? importedTrack : track,
+            )
+          : [...tracksRef.current, importedTrack];
         await saveLibrary(updatedTracks);
         tracksRef.current = updatedTracks;
         setTracks(updatedTracks);
@@ -2886,7 +2916,6 @@ function MusicPlayer() {
         assets,
         'folder',
         { copiedFiles: [], savedWebFiles: [], createdWebUrls: [] },
-        { copyToAppStorage: false },
       );
     } catch (error) {
       if (!isPickerCancelled(error)) {
