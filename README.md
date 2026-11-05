@@ -30,7 +30,7 @@ npm run build:ipa
 
 ## Add music
 
-Tap **Add music from device** to choose individual audio files, or **Add a music folder** to import audio from a folder and its subfolders. Soundroom accepts common formats including MP3, AAC/M4A/M4B, FLAC, WAV, AIFF, CAF, AMR, 3GP, Ogg Vorbis, and Opus. Audio MIME types reported by the file picker are also accepted, so additional formats can be imported. Actual playback depends on the codecs available in the device OS or browser; protected or unsupported files may not play. Soundroom copies selected songs into its private app storage so they remain available in the library; the originals are not moved or deleted. Folder selection is supported on Android and iOS, and in browsers that support directory uploads. Remove a song from the library with the × button beside it.
+Tap the **＋** button in the bottom tab bar to choose **Add music from files** or **Import a music folder**. Soundroom accepts common formats including MP3, AAC/M4A/M4B, FLAC, WAV, AIFF, CAF, AMR, 3GP, Ogg Vorbis, and Opus. Audio MIME types reported by the file picker are also accepted, so additional formats can be imported. Actual playback depends on the codecs available in the device OS or browser; protected or unsupported files may not play. Soundroom copies selected songs into its private app storage so they remain available in the library; the originals are not moved or deleted. Folder selection is supported on Android and iOS, and in browsers that support directory uploads. Remove a song from the library with the × button beside it.
 
 The app only requests access to files the user selects. It does not scan the device, upload music, or contact a streaming service.
 
@@ -40,7 +40,7 @@ On web, imported audio is stored locally in the browser's IndexedDB for that sit
 
 On iOS, Soundroom exposes its Documents folder in the Files app. Copy audio files into **On My iPhone → Soundroom**; Soundroom scans that folder and its subfolders when it opens. The files are then added to the library and copied into Soundroom's managed audio storage.
 
-On Android, tap **Set music drop folder** and choose a folder using the system picker (for example, a folder under Music). Copy audio files there and tap **Scan folder now**, or reopen Soundroom to discover them. Android remembers the folder permission. Newly discovered files are copied into Soundroom's managed storage; the originals in the drop folder are left untouched. If access to the selected folder is revoked, choose it again.
+On Android, open the bottom tab bar’s **＋** menu, tap **Set music folder**, and choose a folder using the system picker (for example, a folder under Music). Copy audio files there and tap **Scan folder now** from the same menu, or reopen Soundroom to discover them. Android remembers the folder permission. Newly discovered files are copied into Soundroom's managed storage; the originals in the drop folder are left untouched. If access to the selected folder is revoked, choose it again.
 
 The iOS Files integration requires a new native build after updating the app configuration.
 
@@ -58,10 +58,10 @@ Tap the information button on a song row to inspect all parsed text tags and fil
 
 Open **Playlists** to create, rename, and delete playlists. Use the plus button beside any song to add it to or remove it from one or more playlists, or create a new playlist with that song. Playlist data is saved locally on the device; deleting a playlist does not delete its songs.
 
-Use **Shuffle** in the Songs tab or inside a playlist to create and start a randomized play queue for that list. Use the plus button beside a song or album/artist/composer/genre group to add it to the queue. Open the queue from the player to add songs from your library, remove songs, or drag tracks to reorder them. The player’s shuffle control randomizes the remaining queue while keeping the current song in place. Drag the playback slider to seek, and adjust the volume with the player’s volume slider.
+Use **Shuffle** in the Songs tab or inside a playlist to create and start a randomized play queue for that list. Use the song options menu or the queue button beside an album/artist/composer/genre group to add tracks to the queue. Open the queue from the player to add songs from your library, remove songs, or drag tracks to reorder them. The player’s shuffle control randomizes the remaining queue while keeping the current song in place. Drag the playback slider to seek. On iOS and Android, the volume slider changes system media volume; in web browsers, it adjusts this player’s playback volume.
 
 ## Equalizer
 
-In the iOS and Android apps, open the player and tap the equalizer control to choose Flat, Bass, Vocal, Treble, Rock, Jazz, Classical, or Electronic, or adjust the five frequency bands yourself. Changes apply during playback and are saved on the device. The web player uses browser audio playback; equalizer processing is available in the native apps.
+In the iOS and Android apps, open the player and tap the equalizer control to choose Flat, Bass, Vocal, Treble, Rock, Jazz, Classical, or Electronic, or adjust the five frequency bands yourself. Choosing a preset enables the equalizer, and changes apply to the live audio output during playback and are saved on the device. Audio routes through the system-selected output, including connected Bluetooth media devices. The web player uses browser audio playback; equalizer processing is available in the native apps.
 
 The interface uses translucent glass panels with native blur on iOS and Android 12+. Older Android versions keep the same translucent styling without native blur.

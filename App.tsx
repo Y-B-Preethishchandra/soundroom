@@ -17,6 +17,7 @@ import {
   type BiquadFilterNode,
   type MediaElementAudioSourceNode,
 } from 'react-native-audio-api';
+import { VolumeManager } from 'react-native-volume-manager';
 import {
   useCallback,
   useEffect,
@@ -381,6 +382,7 @@ type DockIconName =
   | 'playlists'
   | 'files'
   | 'folder'
+  | 'add'
   | 'play'
   | 'pause';
 
@@ -477,6 +479,13 @@ function DockIcon({ name, color }: { name: DockIconName; color: string }) {
         <View style={dockIconStyles.icon}>
           <View style={[dockIconStyles.folderTab, strokeStyle]} />
           <View style={[dockIconStyles.folderBody, strokeStyle]} />
+        </View>
+      );
+    case 'add':
+      return (
+        <View style={[dockIconStyles.icon, dockIconStyles.addIcon]}>
+          <View style={[dockIconStyles.addBarHorizontal, fillStyle]} />
+          <View style={[dockIconStyles.addBarVertical, fillStyle]} />
         </View>
       );
     case 'play':
@@ -716,6 +725,22 @@ const dockIconStyles = StyleSheet.create({
     borderWidth: 1.3,
     borderRadius: 2,
     backgroundColor: 'transparent',
+  },
+  addIcon: {
+    width: 20,
+    height: 20,
+  },
+  addBarHorizontal: {
+    position: 'absolute',
+    width: 16,
+    height: 2,
+    borderRadius: 2,
+  },
+  addBarVertical: {
+    position: 'absolute',
+    width: 2,
+    height: 16,
+    borderRadius: 2,
   },
   playTriangle: {
     width: 0,
@@ -1141,16 +1166,21 @@ function formatTime(seconds: number) {
 }
 
 function AudioStatusBridge({
+  trackId,
   onStatus,
 }: {
-  onStatus: (status: { currentTime: number; duration: number; playing: boolean }) => void;
+  trackId: string;
+  onStatus: (
+    trackId: string,
+    status: { currentTime: number; duration: number; playing: boolean },
+  ) => void;
 }) {
   const { currentTime, duration, playbackState } = useAudioTagContext();
   const playing = playbackState === 'playing' || playbackState === 'buffering';
 
   useEffect(() => {
-    onStatus({ currentTime, duration, playing });
-  }, [currentTime, duration, onStatus, playing]);
+    onStatus(trackId, { currentTime, duration, playing });
+  }, [currentTime, duration, onStatus, playing, trackId]);
 
   return null;
 }
@@ -1269,28 +1299,19 @@ function QueueDragHandle({
   onDragStateChange: (trackId: string | null) => void;
   styles: ReturnType<typeof createStyles>;
 }) {
-  const [dragOriginIndex, setDragOriginIndex] = useState(index);
   const panResponder = useMemo(
     () =>
       PanResponder.create({
         onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dy) > 4,
-        onPanResponderGrant: () => {
-          setDragOriginIndex(index);
-          onDragStateChange(id);
-        },
-        onPanResponderMove: (_, gesture) => {
-          onMove(id, Math.max(0, dragOriginIndex + Math.round(gesture.dy / 65)));
-        },
-        onPanResponderRelease: () => {
+        onPanResponderGrant: () => onDragStateChange(id),
+        onPanResponderRelease: (_, gesture) => {
+          onMove(id, Math.max(0, index + Math.round(gesture.dy / 65)));
           onDragStateChange(null);
         },
-        onPanResponderTerminate: () => {
-          onDragStateChange(null);
-        },
+        onPanResponderTerminate: () => onDragStateChange(null),
         onPanResponderTerminationRequest: () => false,
       }),
-    [dragOriginIndex, id, index, onDragStateChange, onMove],
+    [id, index, onDragStateChange, onMove],
   );
 
   return (
@@ -1330,6 +1351,8 @@ function MusicPlayer() {
     Platform.OS === 'web' ? null : new AudioContext({ latencyHint: 'playback' }),
   );
   const audioRef = useRef<AudioTagHandle>(null);
+  const currentTrackIdRef = useRef<string | null>(null);
+  const volumeChangeVersion = useRef(0);
   const libraryBlurTarget = useRef<ComponentRef<typeof View> | null>(null);
   const equalizerSource = useRef<MediaElementAudioSourceNode | null>(null);
   const equalizerFilters = useRef<BiquadFilterNode[]>([]);
@@ -1339,6 +1362,8 @@ function MusicPlayer() {
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [playbackQueue, setPlaybackQueue] = useState<Track[]>([]);
   const [playerVolume, setPlayerVolume] = useState(1);
+  const [isAddMenuOpen, setIsAddMenuOpen] = useState(false);
+  const [trackOptionsTrack, setTrackOptionsTrack] = useState<Track | null>(null);
   const [detailsTrack, setDetailsTrack] = useState<Track | null>(null);
   const [playlistTrack, setPlaylistTrack] = useState<Track | null>(null);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
@@ -1380,6 +1405,32 @@ function MusicPlayer() {
     seek: (_seconds: number) => {},
     stop: () => {},
   });
+
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+
+    let active = true;
+    let volumeChanged = false;
+    const subscription = VolumeManager.addVolumeListener(({ volume, type }) => {
+      if (Platform.OS === 'android' && type !== undefined && type !== 'music') return;
+      volumeChanged = true;
+      volumeChangeVersion.current += 1;
+      setPlayerVolume(volume);
+    });
+
+    void VolumeManager.getVolume()
+      .then(({ volume }) => {
+        if (active && !volumeChanged) setPlayerVolume(volume);
+      })
+      .catch((error: unknown) => {
+        if (active) setNotice(`Could not read system media volume: ${errorMessage(error)}`);
+      });
+
+    return () => {
+      active = false;
+      subscription.remove();
+    };
+  }, []);
 
   const makeWebObjectUrl = useCallback((blob: Blob) => {
     const uri = URL.createObjectURL(blob);
@@ -1718,6 +1769,17 @@ function MusicPlayer() {
     };
   }, [makeWebObjectUrl, saveLibrary]);
 
+  const changeEqualizerSettings = useCallback((settings: EqualizerSettings) => {
+    try {
+      equalizerFilters.current.forEach((filter, index) => {
+        filter.gain.value = settings.enabled ? settings.bands[index] : 0;
+      });
+      setEqualizerSettings(settings);
+    } catch (error) {
+      setNotice(`Could not update equalizer output: ${errorMessage(error)}`);
+    }
+  }, []);
+
   useEffect(() => {
     let active = true;
     void AsyncStorage.getItem(EQUALIZER_KEY)
@@ -1727,7 +1789,7 @@ function MusicPlayer() {
         if (!isEqualizerSettings(parsed)) {
           throw new Error('Saved equalizer settings are invalid.');
         }
-        setEqualizerSettings(parsed);
+        changeEqualizerSettings(parsed);
       })
       .catch((error: unknown) => {
         if (active) setNotice(`Could not load equalizer settings: ${errorMessage(error)}`);
@@ -1739,7 +1801,7 @@ function MusicPlayer() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [changeEqualizerSettings]);
 
   useEffect(() => {
     if (!equalizerLoaded) return;
@@ -1763,13 +1825,6 @@ function MusicPlayer() {
     },
     [audioContext],
   );
-
-  useEffect(() => {
-    if (!audioContext) return;
-    equalizerFilters.current.forEach((filter, index) => {
-      filter.gain.value = equalizerSettings.enabled ? equalizerSettings.bands[index] : 0;
-    });
-  }, [audioContext, equalizerSettings]);
 
   const updateNotification = useCallback(
     (state: 'playing' | 'paused', elapsedTime = 0) => {
@@ -1804,15 +1859,14 @@ function MusicPlayer() {
         audioRef.current?.seekToTime(0);
         audioRef.current?.play();
         updateNotification('playing', 0);
-        setIsPlayerOpen(false);
       } catch (error) {
         setNotice(`Could not restart this song: ${errorMessage(error)}`);
       }
       return;
     }
+    currentTrackIdRef.current = track.id;
     setPlayback({ currentTime: 0, duration: 0, playing: false });
     setCurrentTrack(track);
-    setIsPlayerOpen(false);
     setNotice('');
   };
 
@@ -1856,7 +1910,7 @@ function MusicPlayer() {
     );
   };
 
-  const moveQueueTrack = (trackId: string, targetIndex: number) => {
+  const moveQueueTrack = useCallback((trackId: string, targetIndex: number) => {
     setPlaybackQueue((queue) => {
       const sourceIndex = queue.findIndex((track) => track.id === trackId);
       if (sourceIndex < 0 || queue.length < 2) return queue;
@@ -1867,7 +1921,7 @@ function MusicPlayer() {
       reordered.splice(boundedTarget, 0, movedTrack);
       return reordered;
     });
-  };
+  }, []);
 
   const removeQueueTrack = (track: Track, index: number) => {
     const updatedQueue = playbackQueue.filter((item) => item.id !== track.id);
@@ -1880,6 +1934,7 @@ function MusicPlayer() {
     }
 
     audioRef.current?.pause();
+    currentTrackIdRef.current = null;
     setCurrentTrack(null);
     setPlayback({ currentTime: 0, duration: 0, playing: false });
     void PlaybackNotificationManager.hide().catch((error: unknown) => {
@@ -1888,12 +1943,42 @@ function MusicPlayer() {
   };
 
   const changeVolume = (value: number) => {
+    volumeChangeVersion.current += 1;
     setPlayerVolume(value);
-    try {
-      audioRef.current?.setVolume(value);
-    } catch (error) {
-      setNotice(`Could not change playback volume: ${errorMessage(error)}`);
+    if (Platform.OS === 'web') {
+      try {
+        audioRef.current?.setVolume(value);
+      } catch (error) {
+        setNotice(`Could not change playback volume: ${errorMessage(error)}`);
+      }
+      return;
     }
+
+    void VolumeManager.setVolume(value, {
+      showUI: false,
+      ...(Platform.OS === 'android' ? { type: 'music' as const } : {}),
+    }).catch((error: unknown) => {
+      setNotice(`Could not change system media volume: ${errorMessage(error)}`);
+      void VolumeManager.getVolume()
+        .then(({ volume }) => setPlayerVolume(volume))
+        .catch((readError: unknown) => {
+          setNotice(`Could not refresh system media volume: ${errorMessage(readError)}`);
+        });
+    });
+  };
+
+  const openPlayer = () => {
+    setIsPlayerOpen(true);
+    if (Platform.OS === 'web') return;
+
+    const requestVersion = volumeChangeVersion.current;
+    void VolumeManager.getVolume()
+      .then(({ volume }) => {
+        if (volumeChangeVersion.current === requestVersion) setPlayerVolume(volume);
+      })
+      .catch((error: unknown) => {
+        setNotice(`Could not read system media volume: ${errorMessage(error)}`);
+      });
   };
 
   const moveTrack = (direction: 1 | -1) => {
@@ -1936,13 +2021,15 @@ function MusicPlayer() {
   };
 
   const onAudioStatus = useCallback(
-    (status: { currentTime: number; duration: number; playing: boolean }) => {
+    (trackId: string, status: { currentTime: number; duration: number; playing: boolean }) => {
+      if (currentTrackIdRef.current !== trackId) return;
       setPlayback(status);
     },
     [],
   );
 
-  const onAudioLoad = useCallback(() => {
+  const onAudioLoad = useCallback((trackId: string) => {
+    if (currentTrackIdRef.current !== trackId) return;
     const element = audioRef.current;
     if (!element) {
       setNotice('The audio player did not initialize correctly.');
@@ -1950,8 +2037,8 @@ function MusicPlayer() {
     }
 
     try {
-      element.setVolume(playerVolume);
       if (Platform.OS === 'web') {
+        element.setVolume(playerVolume);
         element.play();
         updateNotification('playing');
         return;
@@ -1960,27 +2047,54 @@ function MusicPlayer() {
         throw new Error('The audio processing context is unavailable.');
       }
 
-      equalizerSource.current?.disconnect();
-      equalizerFilters.current.forEach((filter) => filter.disconnect());
-      const source = audioContext.createMediaElementSource(element);
-      const filters = EQUALIZER_BANDS.map((band, index) => {
-        const filter = audioContext.createBiquadFilter();
-        filter.type = 'peaking';
-        filter.frequency.value = band.frequency;
-        filter.Q.value = 1;
-        filter.gain.value = equalizerSettings.enabled ? equalizerSettings.bands[index] : 0;
-        return filter;
-      });
-
-      source.connect(filters[0]);
-      for (let index = 0; index < filters.length - 1; index += 1) {
-        filters[index].connect(filters[index + 1]);
+      if (Platform.OS === 'ios') {
+        try {
+          AudioManager.setSystemOptions({
+            ios: {
+              category: 'playback',
+              mode: 'default',
+              options: ['allowBluetoothA2DP', 'allowAirPlay'],
+            },
+          });
+        } catch (error) {
+          setNotice(`Could not configure Bluetooth audio playback: ${errorMessage(error)}`);
+        }
       }
-      filters[filters.length - 1].connect(audioContext.destination);
-      equalizerSource.current = source;
-      equalizerFilters.current = filters;
+
+      let nextSource: MediaElementAudioSourceNode | null = null;
+      const nextFilters: BiquadFilterNode[] = [];
+      try {
+        equalizerSource.current?.disconnect();
+        equalizerFilters.current.forEach((filter) => filter.disconnect());
+        nextSource = audioContext.createMediaElementSource(element);
+        EQUALIZER_BANDS.forEach((band, index) => {
+          const filter = audioContext.createBiquadFilter();
+          filter.type = 'peaking';
+          filter.frequency.value = band.frequency;
+          filter.Q.value = 1;
+          filter.gain.value = equalizerSettings.enabled ? equalizerSettings.bands[index] : 0;
+          nextFilters.push(filter);
+        });
+
+        nextSource.connect(nextFilters[0]);
+        for (let index = 0; index < nextFilters.length - 1; index += 1) {
+          nextFilters[index].connect(nextFilters[index + 1]);
+        }
+        nextFilters[nextFilters.length - 1].connect(audioContext.destination);
+        equalizerSource.current = nextSource;
+        equalizerFilters.current = nextFilters;
+      } catch (error) {
+        nextSource?.disconnect();
+        nextFilters.forEach((filter) => filter.disconnect());
+        equalizerSource.current?.disconnect();
+        equalizerFilters.current.forEach((filter) => filter.disconnect());
+        equalizerSource.current = null;
+        equalizerFilters.current = [];
+        setNotice(`Equalizer unavailable; playing without processing: ${errorMessage(error)}`);
+      }
 
       void (async () => {
+        if (currentTrackIdRef.current !== trackId) return;
         if (Platform.OS === 'android' && !notificationPermissionRequested.current) {
           notificationPermissionRequested.current = true;
           try {
@@ -1998,7 +2112,9 @@ function MusicPlayer() {
         }
 
         try {
+          if (currentTrackIdRef.current !== trackId) return;
           await audioContext.resume();
+          if (currentTrackIdRef.current !== trackId) return;
           element.play();
           updateNotification('playing');
         } catch (error) {
@@ -2010,24 +2126,28 @@ function MusicPlayer() {
     }
   }, [audioContext, equalizerSettings, playerVolume, updateNotification]);
 
-  const onAudioError = (error: Error) => {
+  const onAudioError = (trackId: string, error: Error) => {
+    if (currentTrackIdRef.current !== trackId) return;
     setPlayback((status) => ({ ...status, playing: false }));
     setNotice(
       `Could not play this audio file. Its format may not be supported on this device: ${error.message}`,
     );
   };
 
-  const onAudioPlay = () => {
+  const onAudioPlay = (trackId: string) => {
+    if (currentTrackIdRef.current !== trackId) return;
     setPlayback((status) => ({ ...status, playing: true }));
     updateNotification('playing', playback.currentTime);
   };
 
-  const onAudioPause = () => {
+  const onAudioPause = (trackId: string) => {
+    if (currentTrackIdRef.current !== trackId) return;
     setPlayback((status) => ({ ...status, playing: false }));
     updateNotification('paused', playback.currentTime);
   };
 
-  const onAudioEnded = () => {
+  const onAudioEnded = (trackId: string) => {
+    if (currentTrackIdRef.current !== trackId) return;
     if (isRepeating) return;
     setPlayback((status) => ({ ...status, playing: false }));
     if (playbackQueue.length > 1) {
@@ -2451,6 +2571,7 @@ function MusicPlayer() {
           }
           if (currentTrack?.id === track.id) {
             audioRef.current?.pause();
+            currentTrackIdRef.current = null;
             setCurrentTrack(null);
             setPlayback({ currentTime: 0, duration: 0, playing: false });
             void PlaybackNotificationManager.hide().catch((error: unknown) => {
@@ -2634,41 +2755,16 @@ function MusicPlayer() {
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`Add ${item.title} to playback queue`}
-          onPress={() => addTracksToQueue([item], item.title)}
+          accessibilityLabel={`More options for ${item.title}`}
+          onPress={() => setTrackOptionsTrack(item)}
           hitSlop={8}
-          style={styles.detailsButton}
+          style={styles.trackOptionsButton}
         >
-          <Text style={styles.queueAddGlyph}>＋</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Manage playlists for ${item.title}`}
-          accessibilityState={{ disabled: !playlistsReady }}
-          disabled={!playlistsReady}
-          onPress={() => setPlaylistTrack(item)}
-          hitSlop={8}
-          style={styles.detailsButton}
-        >
-          <Text style={styles.playlistAddText}>＋</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`View tags for ${item.title}`}
-          onPress={() => setDetailsTrack(item)}
-          hitSlop={8}
-          style={styles.detailsButton}
-        >
-          <Text style={styles.detailsButtonText}>i</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Remove ${item.title}`}
-          onPress={() => removeTrack(item)}
-          hitSlop={10}
-          style={styles.removeButton}
-        >
-          <Text style={styles.removeButtonText}>×</Text>
+          <View style={styles.trackOptionsIcon}>
+            {[0, 1, 2].map((dot) => (
+              <View key={dot} style={styles.trackOptionsDot} />
+            ))}
+          </View>
         </Pressable>
       </GlassSurface>
     );
@@ -2709,7 +2805,7 @@ function MusicPlayer() {
           accessibilityLabel={`Add ${group.title} songs to playback queue`}
           onPress={() => addTracksToQueue(groupTracks, group.title)}
           hitSlop={8}
-          style={styles.detailsButton}
+          style={styles.groupQueueButton}
         >
           <Text style={styles.queueAddGlyph}>＋</Text>
         </Pressable>
@@ -2827,51 +2923,6 @@ function MusicPlayer() {
           <Text style={styles.themeToggleText}>{isLightTheme ? 'LIGHT' : 'DARK'}</Text>
         </Pressable>
       </View>
-
-      {Platform.OS !== 'web' && (
-        <GlassSurface
-          light={isLightTheme}
-          contentStyle={styles.hero}
-          intensity={32}
-          style={styles.heroGlass}
-        >
-          {Platform.OS === 'ios' ? (
-            <Text style={styles.importHint}>
-              Or copy music into Files › On My iPhone › Soundroom. New files are added when you open the app.
-            </Text>
-          ) : (
-            <View style={styles.dropFolderActions}>
-              <Pressable
-                accessibilityRole="button"
-                onPress={() => void chooseDropFolder()}
-                style={styles.dropFolderButton}
-              >
-                <Text style={styles.dropFolderButtonText}>
-                  {dropFolderUri ? 'CHANGE MUSIC DROP FOLDER' : 'SET MUSIC DROP FOLDER'}
-                </Text>
-              </Pressable>
-              {dropFolderUri && (
-                <>
-                  <Text numberOfLines={1} style={styles.dropFolderStatus}>
-                    {isScanningDropFolder
-                      ? 'SCANNING FOLDER…'
-                      : `CONNECTED · ${new Directory(dropFolderUri).name}`}
-                  </Text>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="Scan music drop folder"
-                    disabled={isScanningDropFolder || isLoading}
-                    onPress={() => setDropFolderScanRequest((request) => request + 1)}
-                    style={styles.dropFolderButton}
-                  >
-                    <Text style={styles.dropFolderButtonText}>SCAN FOLDER NOW</Text>
-                  </Pressable>
-                </>
-              )}
-            </View>
-          )}
-        </GlassSurface>
-      )}
 
       <View style={styles.libraryHeading}>
         <View>
@@ -3008,15 +3059,15 @@ function MusicPlayer() {
             autoPlay={false}
             context={audioContext ?? undefined}
             loop={isRepeating}
-            onEnded={onAudioEnded}
-            onError={onAudioError}
-            onLoad={onAudioLoad}
-            onPause={onAudioPause}
-            onPlay={onAudioPlay}
+            onEnded={() => onAudioEnded(currentTrack.id)}
+            onError={(error) => onAudioError(currentTrack.id, error)}
+            onLoad={() => onAudioLoad(currentTrack.id)}
+            onPause={() => onAudioPause(currentTrack.id)}
+            onPlay={() => onAudioPlay(currentTrack.id)}
             ref={audioRef}
             source={currentTrack.uri}
           >
-            <AudioStatusBridge onStatus={onAudioStatus} />
+            <AudioStatusBridge onStatus={onAudioStatus} trackId={currentTrack.id} />
           </Audio>
         </View>
       )}
@@ -3094,7 +3145,12 @@ function MusicPlayer() {
           }
           contentContainerStyle={[
             styles.listContent,
-            { paddingBottom: currentTrack ? 196 + insets.bottom : 128 + insets.bottom },
+            {
+              paddingBottom:
+                (currentTrack ? 196 : 128) +
+                (isAddMenuOpen ? 176 : 0) +
+                insets.bottom,
+            },
           ]}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
@@ -3119,7 +3175,7 @@ function MusicPlayer() {
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`Open player for ${currentTrack.title}`}
-                onPress={() => setIsPlayerOpen(true)}
+                onPress={openPlayer}
                 style={styles.miniPlayer}
               >
                 <Artwork seed={currentTrack.id} size={44} uri={currentTrack.artworkUri} styles={styles} />
@@ -3149,40 +3205,109 @@ function MusicPlayer() {
               </Pressable>
             </GlassSurface>
           )}
-          <View style={styles.dockImportActions}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Add music from files"
-              accessibilityState={{ disabled: isImporting || isLoading }}
-              disabled={isImporting || isLoading}
-              onPress={importSongs}
-              style={({ pressed }) => [
-                styles.dockImportButton,
-                pressed && styles.buttonPressed,
-                (isImporting || isLoading) && styles.buttonDisabled,
-              ]}
+          {isAddMenuOpen && (
+            <GlassSurface
+              blurTarget={libraryBlurTarget}
+              light={isLightTheme}
+              contentStyle={styles.addMenuContent}
+              intensity={78}
+              style={styles.addMenu}
             >
-              <DockIcon name="files" color={COLORS.accent} />
-              <Text style={styles.dockImportText}>
-                {isImporting ? 'ADDING…' : 'ADD FILES'}
-              </Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Add a music folder"
-              accessibilityState={{ disabled: isImporting || isLoading }}
-              disabled={isImporting || isLoading}
-              onPress={importMusicFolder}
-              style={({ pressed }) => [
-                styles.dockImportButton,
-                pressed && styles.buttonPressed,
-                (isImporting || isLoading) && styles.buttonDisabled,
-              ]}
-            >
-              <DockIcon name="folder" color={COLORS.accent} />
-              <Text style={styles.dockImportText}>ADD FOLDER</Text>
-            </Pressable>
-          </View>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Add music from files"
+                accessibilityState={{ disabled: isImporting || isLoading }}
+                disabled={isImporting || isLoading}
+                onPress={() => {
+                  setIsAddMenuOpen(false);
+                  void importSongs();
+                }}
+                style={({ pressed }) => [
+                  styles.addMenuOption,
+                  pressed && styles.buttonPressed,
+                  (isImporting || isLoading) && styles.buttonDisabled,
+                ]}
+              >
+                <DockIcon name="files" color={COLORS.accent} />
+                <Text style={styles.addMenuOptionText}>
+                  {isImporting ? 'Adding music…' : 'Add music from files'}
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Add a music folder"
+                accessibilityState={{ disabled: isImporting || isLoading }}
+                disabled={isImporting || isLoading}
+                onPress={() => {
+                  setIsAddMenuOpen(false);
+                  void importMusicFolder();
+                }}
+                style={({ pressed }) => [
+                  styles.addMenuOption,
+                  pressed && styles.buttonPressed,
+                  (isImporting || isLoading) && styles.buttonDisabled,
+                ]}
+              >
+                <DockIcon name="folder" color={COLORS.accent} />
+                <Text style={styles.addMenuOptionText}>Import a music folder</Text>
+              </Pressable>
+              {Platform.OS === 'android' && (
+                <>
+                  <View style={styles.addMenuDivider} />
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      dropFolderUri ? 'Change music folder' : 'Set music folder'
+                    }
+                    disabled={isImporting || isLoading || isScanningDropFolder}
+                    onPress={() => {
+                      setIsAddMenuOpen(false);
+                      void chooseDropFolder();
+                    }}
+                    style={({ pressed }) => [
+                      styles.addMenuOption,
+                      pressed && styles.buttonPressed,
+                      (isImporting || isLoading || isScanningDropFolder) &&
+                        styles.buttonDisabled,
+                    ]}
+                  >
+                    <DockIcon name="folder" color={COLORS.accent} />
+                    <Text style={styles.addMenuOptionText}>
+                      {dropFolderUri ? 'Change music folder' : 'Set music folder'}
+                    </Text>
+                  </Pressable>
+                  {dropFolderUri && (
+                    <>
+                      <Text numberOfLines={1} style={styles.addMenuStatus}>
+                        {isScanningDropFolder
+                          ? 'Scanning folder…'
+                          : `Connected · ${new Directory(dropFolderUri).name}`}
+                      </Text>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="Scan music folder now"
+                        accessibilityState={{
+                          disabled: isScanningDropFolder || isLoading,
+                        }}
+                        disabled={isScanningDropFolder || isLoading}
+                        onPress={() => {
+                          setDropFolderScanRequest((request) => request + 1);
+                        }}
+                        style={({ pressed }) => [
+                          styles.addMenuOption,
+                          pressed && styles.buttonPressed,
+                          (isScanningDropFolder || isLoading) &&
+                            styles.buttonDisabled,
+                        ]}
+                      >
+                        <Text style={styles.addMenuOptionText}>Scan folder now</Text>
+                      </Pressable>
+                    </>
+                  )}
+                </>
+              )}
+            </GlassSurface>
+          )}
           <GlassSurface
             blurTarget={libraryBlurTarget}
             light={isLightTheme}
@@ -3199,6 +3324,7 @@ function MusicPlayer() {
                   accessibilityState={{ selected }}
                   key={mode.id}
                   onPress={() => {
+                    setIsAddMenuOpen(false);
                     setBrowseMode(mode.id);
                     setSelectedGroup(null);
                     setSelectedPlaylistId(null);
@@ -3218,6 +3344,24 @@ function MusicPlayer() {
                 </Pressable>
               );
             })}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={
+                isAddMenuOpen ? 'Close add music menu' : 'Add music'
+              }
+              accessibilityState={{ expanded: isAddMenuOpen }}
+              onPress={() => setIsAddMenuOpen((isOpen) => !isOpen)}
+              style={[
+                styles.browseTab,
+                styles.addMenuTab,
+                isAddMenuOpen && styles.browseTabSelected,
+              ]}
+            >
+              <DockIcon
+                name="add"
+                color={isAddMenuOpen ? COLORS.accent : COLORS.secondaryText}
+              />
+            </Pressable>
           </GlassSurface>
         </View>
       </View>
@@ -3313,7 +3457,9 @@ function MusicPlayer() {
             <View style={styles.volumeControl}>
               <Text style={styles.volumeIcon}>−</Text>
               <Slider
-                accessibilityLabel="Playback volume"
+                accessibilityLabel={
+                  Platform.OS === 'web' ? 'Playback volume' : 'System media volume'
+                }
                 maximumTrackTintColor={COLORS.border}
                 maximumValue={1}
                 minimumTrackTintColor={COLORS.accent}
@@ -3499,6 +3645,102 @@ function MusicPlayer() {
                 ))
               )}
             </ScrollView>
+          </SafeAreaView>
+        </View>
+      </Modal>
+      <Modal
+        animationType="fade"
+        onRequestClose={() => setTrackOptionsTrack(null)}
+        transparent
+        visible={trackOptionsTrack !== null}
+      >
+        <View style={styles.detailsBackdrop}>
+          <Pressable
+            accessible={false}
+            onPress={() => setTrackOptionsTrack(null)}
+            style={StyleSheet.absoluteFill}
+          />
+          <SafeAreaView style={[styles.detailsSheet, styles.trackOptionsSheet]}>
+            <View style={styles.detailsHeader}>
+              <View style={styles.detailsHeading}>
+                <Text style={styles.eyebrow}>SONG OPTIONS</Text>
+                <Text numberOfLines={1} style={styles.detailsTitle}>
+                  {trackOptionsTrack?.title}
+                </Text>
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Close song options"
+                onPress={() => setTrackOptionsTrack(null)}
+                hitSlop={10}
+              >
+                <Text style={styles.detailsClose}>×</Text>
+              </Pressable>
+            </View>
+            <View style={styles.trackOptionsList}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Add ${trackOptionsTrack?.title ?? 'song'} to playback queue`}
+                onPress={() => {
+                  if (trackOptionsTrack) {
+                    addTracksToQueue([trackOptionsTrack], trackOptionsTrack.title);
+                  }
+                  setTrackOptionsTrack(null);
+                }}
+                style={({ pressed }) => [
+                  styles.trackOption,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Text style={styles.trackOptionText}>Add to queue</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Manage playlists for ${trackOptionsTrack?.title ?? 'song'}`}
+                accessibilityState={{ disabled: !playlistsReady }}
+                disabled={!playlistsReady}
+                onPress={() => {
+                  if (trackOptionsTrack) setPlaylistTrack(trackOptionsTrack);
+                  setTrackOptionsTrack(null);
+                }}
+                style={({ pressed }) => [
+                  styles.trackOption,
+                  pressed && styles.buttonPressed,
+                  !playlistsReady && styles.buttonDisabled,
+                ]}
+              >
+                <Text style={styles.trackOptionText}>Manage playlists</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`View tags for ${trackOptionsTrack?.title ?? 'song'}`}
+                onPress={() => {
+                  if (trackOptionsTrack) setDetailsTrack(trackOptionsTrack);
+                  setTrackOptionsTrack(null);
+                }}
+                style={({ pressed }) => [
+                  styles.trackOption,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Text style={styles.trackOptionText}>View information</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Remove ${trackOptionsTrack?.title ?? 'song'} from library`}
+                onPress={() => {
+                  if (trackOptionsTrack) removeTrack(trackOptionsTrack);
+                  setTrackOptionsTrack(null);
+                }}
+                style={({ pressed }) => [
+                  styles.trackOption,
+                  styles.trackOptionDestructive,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Text style={styles.trackOptionDestructiveText}>Remove from library</Text>
+              </Pressable>
+            </View>
           </SafeAreaView>
         </View>
       </Modal>
@@ -3717,7 +3959,7 @@ function MusicPlayer() {
       </Modal>
       <EqualizerSheet
         light={isLightTheme}
-        onChange={setEqualizerSettings}
+        onChange={changeEqualizerSettings}
         onClose={() => setIsEqualizerOpen(false)}
         settings={equalizerSettings}
         visible={isEqualizerOpen}
@@ -3884,19 +4126,6 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     fontWeight: '800',
     letterSpacing: 2,
   },
-  hero: {
-    padding: 14,
-  },
-  heroGlass: {
-    borderRadius: 18,
-    marginTop: 8,
-    marginBottom: 18,
-    shadowColor: isLight ? '#78952B' : '#B9D968',
-    shadowOpacity: 0.13,
-    shadowRadius: 24,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 4,
-  },
   eyebrow: {
     color: COLORS.accent,
     fontSize: 9,
@@ -3910,39 +4139,6 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
   buttonDisabled: {
     opacity: 0.7,
   },
-  importHint: {
-    color: COLORS.muted,
-    textAlign: 'center',
-    fontSize: 10,
-    marginTop: 10,
-  },
-  dropFolderActions: {
-    alignItems: 'center',
-    gap: 7,
-    marginTop: 11,
-  },
-  dropFolderButton: {
-    minHeight: 34,
-    justifyContent: 'center',
-    paddingHorizontal: 13,
-    borderRadius: 12,
-    backgroundColor: COLORS.controlSurface,
-    borderWidth: 1,
-    borderColor: COLORS.controlBorder,
-  },
-  dropFolderButtonText: {
-    color: COLORS.accent,
-    fontSize: 8,
-    fontWeight: '800',
-    letterSpacing: 0.8,
-    textAlign: 'center',
-  },
-  dropFolderStatus: {
-    maxWidth: '100%',
-    color: COLORS.secondaryText,
-    fontSize: 8,
-    letterSpacing: 0.4,
-  },
   navigationBar: {
     alignSelf: 'center',
     width: '100%',
@@ -3955,27 +4151,37 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     alignItems: 'center',
     padding: 4,
   },
-  dockImportActions: {
-    flexDirection: 'row',
-    gap: 8,
+  addMenu: {
+    borderRadius: 19,
   },
-  dockImportButton: {
-    flex: 1,
-    minHeight: 38,
+  addMenuContent: {
+    padding: 8,
+    gap: 3,
+  },
+  addMenuOption: {
+    minHeight: 44,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 7,
-    borderRadius: 14,
-    backgroundColor: COLORS.controlSurface,
-    borderWidth: 1,
-    borderColor: COLORS.controlBorder,
+    gap: 12,
+    paddingHorizontal: 12,
+    borderRadius: 12,
   },
-  dockImportText: {
+  addMenuOptionText: {
     color: COLORS.primaryText,
-    fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 0.8,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  addMenuDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: COLORS.controlBorder,
+    marginHorizontal: 12,
+    marginVertical: 3,
+  },
+  addMenuStatus: {
+    color: COLORS.secondaryText,
+    fontSize: 10,
+    paddingHorizontal: 12,
+    paddingBottom: 3,
   },
   browseTab: {
     flex: 1,
@@ -3988,6 +4194,10 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
   },
   browseTabSelected: {
     backgroundColor: COLORS.selectedSurface,
+  },
+  addMenuTab: {
+    flex: 0,
+    width: 42,
   },
   browseTabText: {
     color: COLORS.secondaryText,
@@ -4250,6 +4460,24 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     justifyContent: 'center',
     paddingVertical: 8,
   },
+  trackOptionsButton: {
+    width: 36,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 4,
+  },
+  trackOptionsIcon: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+  },
+  trackOptionsDot: {
+    width: 3.5,
+    height: 3.5,
+    borderRadius: 2,
+    backgroundColor: COLORS.secondaryText,
+  },
   playlistAddText: {
     color: COLORS.accent,
     fontSize: 21,
@@ -4262,6 +4490,13 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     lineHeight: 22,
     fontWeight: '700',
   },
+  groupQueueButton: {
+    width: 28,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 3,
+  },
   playlistManageButton: {
     width: 30,
     height: 32,
@@ -4272,26 +4507,6 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
   playlistManageText: {
     color: COLORS.secondaryText,
     fontSize: 17,
-  },
-  detailsButton: {
-    width: 28,
-    height: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginLeft: 3,
-  },
-  detailsButtonText: {
-    color: COLORS.secondaryText,
-    fontSize: 13,
-    fontWeight: '700',
-    borderWidth: 1,
-    borderColor: COLORS.muted,
-    width: 17,
-    height: 17,
-    lineHeight: 15,
-    textAlign: 'center',
-    borderRadius: 9,
-    overflow: 'hidden',
   },
   removeButtonText: {
     color: COLORS.muted,
@@ -4312,6 +4527,33 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     borderWidth: 1,
     borderColor: COLORS.controlBorder,
     overflow: 'hidden',
+  },
+  trackOptionsSheet: {
+    minHeight: 0,
+  },
+  trackOptionsList: {
+    padding: 14,
+    gap: 8,
+  },
+  trackOption: {
+    minHeight: 48,
+    justifyContent: 'center',
+    paddingHorizontal: 15,
+    borderRadius: 13,
+    backgroundColor: COLORS.controlSurface,
+  },
+  trackOptionText: {
+    color: COLORS.primaryText,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  trackOptionDestructive: {
+    backgroundColor: 'transparent',
+  },
+  trackOptionDestructiveText: {
+    color: COLORS.error,
+    fontSize: 13,
+    fontWeight: '600',
   },
   detailsHeader: {
     minHeight: 76,
@@ -4750,7 +4992,8 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     paddingVertical: 12,
   },
   sideControl: {
-    width: 32,
+    width: 52,
+    height: 52,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -4762,8 +5005,8 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     color: COLORS.accent,
   },
   skipButton: {
-    width: 37,
-    height: 48,
+    width: 52,
+    height: 52,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -4773,9 +5016,9 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     fontWeight: '700',
   },
   mainPlayButton: {
-    width: 68,
-    height: 68,
-    borderRadius: 24,
+    width: 52,
+    height: 52,
+    borderRadius: 18,
     backgroundColor: COLORS.accent,
     alignItems: 'center',
     justifyContent: 'center',

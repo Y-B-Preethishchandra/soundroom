@@ -125,7 +125,13 @@ export default function EqualizerSheet({
                   accessibilityRole="button"
                   accessibilityState={{ selected }}
                   key={preset.name}
-                  onPress={() => onChange({ ...settings, bands: [...preset.bands] })}
+                  onPress={() =>
+                    onChange({
+                      ...settings,
+                      enabled: true,
+                      bands: [...preset.bands],
+                    })
+                  }
                   style={[styles.preset, selected && styles.presetSelected]}
                 >
                   <Text style={[styles.presetText, selected && styles.presetTextSelected]}>
