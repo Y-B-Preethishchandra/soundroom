@@ -30,6 +30,7 @@ import {
   AppState,
   ActivityIndicator,
   Alert,
+  Animated,
   FlatList,
   Image,
   Keyboard,
@@ -1454,6 +1455,9 @@ function MusicPlayer() {
   const [isRepeating, setIsRepeating] = useState(false);
   const [notice, setNotice] = useState('');
   const tracksRef = useRef<Track[]>([]);
+  const [queueRowOffsets, setQueueRowOffsets] = useState(
+    () => new Map<string, Animated.Value>(),
+  );
   const handledDropFolderScanRequest = useRef(0);
   const notificationPermissionRequested = useRef(false);
   const webObjectUrls = useRef(new Set<string>());
@@ -2175,15 +2179,37 @@ function MusicPlayer() {
     const reordered = [...playbackQueue];
     const [movedTrack] = reordered.splice(sourceIndex, 1);
     reordered.splice(boundedTarget, 0, movedTrack);
-    LayoutAnimation.configureNext({
-      duration: 240,
-      update: {
-        type: LayoutAnimation.Types.spring,
-        springDamping: 0.8,
-      },
-    });
+    if (Platform.OS === 'web') {
+      const nextOffsets = new Map(queueRowOffsets);
+      const activeAnimations: Animated.CompositeAnimation[] = [];
+      playbackQueue.forEach((track, previousIndex) => {
+        const nextIndex = reordered.findIndex((item) => item.id === track.id);
+        if (previousIndex === nextIndex) return;
+        const offset = nextOffsets.get(track.id) ?? new Animated.Value(0);
+        nextOffsets.set(track.id, offset);
+        offset.stopAnimation();
+        offset.setValue((previousIndex - nextIndex) * 65);
+        activeAnimations.push(
+          Animated.timing(offset, {
+            toValue: 0,
+            duration: 240,
+            useNativeDriver: false,
+          }),
+        );
+      });
+      setQueueRowOffsets(nextOffsets);
+      requestAnimationFrame(() => Animated.parallel(activeAnimations).start());
+    } else {
+      LayoutAnimation.configureNext({
+        duration: 240,
+        update: {
+          type: LayoutAnimation.Types.spring,
+          springDamping: 0.8,
+        },
+      });
+    }
     setPlaybackQueue(reordered);
-  }, [playbackQueue]);
+  }, [playbackQueue, queueRowOffsets]);
 
   const removeQueueTrack = (track: Track, index: number) => {
     const updatedQueue = playbackQueue.filter((item) => item.id !== track.id);
@@ -4396,11 +4422,17 @@ function MusicPlayer() {
                 <Text style={styles.playlistEmptyHint}>The playback queue is empty.</Text>
               ) : (
                 playbackQueue.map((track, index) => (
-                  <View
+                  <Animated.View
                     key={track.id}
                     style={[
                       styles.queueRow,
                       draggingQueueTrackId === track.id && styles.queueRowDragging,
+                      Platform.OS === 'web' &&
+                        queueRowOffsets.has(track.id) && {
+                          transform: [
+                            { translateY: queueRowOffsets.get(track.id) ?? 0 },
+                          ],
+                        },
                     ]}
                   >
                     <Artwork seed={track.id} size={42} uri={track.artworkUri} styles={styles} />
@@ -4434,7 +4466,7 @@ function MusicPlayer() {
                         <Text style={styles.removeButtonText}>×</Text>
                       </Pressable>
                     </View>
-                  </View>
+                  </Animated.View>
                 ))
               )}
             </ScrollView>
