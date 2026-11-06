@@ -2,11 +2,20 @@ import { File, Paths } from 'expo-file-system';
 import { decodeAudioData } from 'react-native-audio-api';
 import { loadTensorflowModel, type TfliteModel } from 'react-native-fast-tflite';
 
-import { MUSIC_AI_CLASSES, type MusicAiTag } from './musicAiTypes';
+import {
+  MUSIC_AI_CLASSES,
+  type MusicAiCategory,
+  type MusicAiTag,
+} from './musicAiTypes';
 
 // YAMNet expects mono audio resampled to 16 kHz.
 const MODEL_SAMPLE_RATE = 16_000;
 const MAX_ANALYSIS_DURATION_SECONDS = 5 * 60;
+const TAG_SCORE_THRESHOLDS: Record<MusicAiCategory, number> = {
+  genre: 0.08,
+  mood: 0.03,
+  theme: 0.03,
+};
 let temporaryAnalysisFileId = 0;
 // Metro resolves bundled TFLite models from static require calls.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -42,7 +51,7 @@ function getTags(scores: number[], classCount: number): MusicAiTag[] {
       label,
       score: scores[classIndex] ?? 0,
     }))
-    .filter(({ score }) => score >= 0.08)
+    .filter(({ category, score }) => score >= TAG_SCORE_THRESHOLDS[category])
     .sort((first, second) => second.score - first.score);
   const categories: MusicAiTag['category'][] = ['genre', 'mood', 'theme'];
   return categories

@@ -31,6 +31,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  BackHandler,
   FlatList,
   Image,
   Keyboard,
@@ -68,7 +69,7 @@ import {
   registerMusicAiBackgroundTask,
   unregisterMusicAiBackgroundTask,
 } from './musicAiBackground';
-import type { MusicAiTag } from './musicAiTypes';
+import { MUSIC_AI_ANALYSIS_VERSION, type MusicAiTag } from './musicAiTypes';
 import { THEME_COLORS, type ThemeColors, type ThemeMode } from './theme';
 import {
   isWebTrackUri,
@@ -116,6 +117,7 @@ type Track = {
   metadataLoaded?: boolean;
   aiTags?: MusicAiTag[];
   aiAnalyzedAt?: number;
+  aiAnalysisVersion?: number;
   aiError?: string;
   addedAt: number;
 };
@@ -821,6 +823,8 @@ function isTrack(value: unknown): value is Track {
             typeof tag.score === 'number',
         ))) &&
     (track.aiAnalyzedAt === undefined || typeof track.aiAnalyzedAt === 'number') &&
+    (track.aiAnalysisVersion === undefined ||
+      typeof track.aiAnalysisVersion === 'number') &&
     (track.aiError === undefined || typeof track.aiError === 'string') &&
     typeof track.addedAt === 'number'
   );
@@ -1455,6 +1459,7 @@ function MusicPlayer() {
   const [isRepeating, setIsRepeating] = useState(false);
   const [notice, setNotice] = useState('');
   const tracksRef = useRef<Track[]>([]);
+  const libraryImportQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [queueRowOffsets, setQueueRowOffsets] = useState(
     () => new Map<string, Animated.Value>(),
   );
@@ -1479,6 +1484,39 @@ function MusicPlayer() {
   useEffect(() => {
     tracksRef.current = tracks;
   }, [tracks]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (isBrowseMenuOpen) {
+        setIsBrowseMenuOpen(false);
+        return true;
+      }
+      if (isSettingsOpen) {
+        setIsSettingsOpen(false);
+        return true;
+      }
+      if (selectedGroup || selectedPlaylistId !== null) {
+        setSelectedGroup(null);
+        setSelectedPlaylistId(null);
+        return true;
+      }
+      if (browseMode !== 'songs') {
+        setBrowseMode('songs');
+        return true;
+      }
+      return false;
+    });
+
+    return () => subscription.remove();
+  }, [
+    browseMode,
+    isBrowseMenuOpen,
+    isSettingsOpen,
+    selectedGroup,
+    selectedPlaylistId,
+  ]);
 
   useEffect(() => {
     if (Platform.OS === 'web') return;
@@ -1535,6 +1573,21 @@ function MusicPlayer() {
         ),
       ),
     ), []);
+
+  const persistImportedTrack = useCallback((track: Track) => {
+    const persist = libraryImportQueueRef.current.catch(() => undefined).then(async () => {
+      const updatedTracks = tracksRef.current.some((existingTrack) => existingTrack.id === track.id)
+        ? tracksRef.current.map((existingTrack) =>
+            existingTrack.id === track.id ? track : existingTrack,
+          )
+        : [...tracksRef.current, track];
+      await saveLibrary(updatedTracks);
+      tracksRef.current = updatedTracks;
+      setTracks(updatedTracks);
+    });
+    libraryImportQueueRef.current = persist;
+    return persist;
+  }, [saveLibrary]);
 
   const savePlaylists = (nextPlaylists: Playlist[]) =>
     AsyncStorage.setItem(PLAYLISTS_KEY, JSON.stringify(nextPlaylists));
@@ -1778,7 +1831,10 @@ function MusicPlayer() {
     [groupedLibrary, listingGroups, listingPlaylists, sortedTracks, visiblePlaylists],
   );
   const pendingAiTrackIds = tracks
-    .filter((track) => track.aiAnalyzedAt === undefined && !track.aiError)
+    .filter(
+      (track) =>
+        track.aiAnalysisVersion !== MUSIC_AI_ANALYSIS_VERSION && !track.aiError,
+    )
     .map((track) => track.id)
     .join('|');
 
@@ -1947,6 +2003,7 @@ function MusicPlayer() {
             ...track,
             aiTags: analyzedTrack.aiTags ?? [],
             aiAnalyzedAt: analyzedTrack.aiAnalyzedAt,
+            aiAnalysisVersion: analyzedTrack.aiAnalysisVersion,
           };
           if (analyzedTrack.aiError) updatedTrack.aiError = analyzedTrack.aiError;
           else delete updatedTrack.aiError;
@@ -2014,7 +2071,8 @@ function MusicPlayer() {
               !savedTrack ||
               savedTrack.aiAnalyzedAt === undefined ||
               (track.aiAnalyzedAt !== undefined &&
-                track.aiAnalyzedAt >= savedTrack.aiAnalyzedAt)
+                track.aiAnalyzedAt >= savedTrack.aiAnalyzedAt &&
+                track.aiAnalysisVersion === savedTrack.aiAnalysisVersion)
             ) {
               return track;
             }
@@ -2022,6 +2080,7 @@ function MusicPlayer() {
               ...track,
               aiTags: savedTrack.aiTags ?? [],
               aiAnalyzedAt: savedTrack.aiAnalyzedAt,
+              aiAnalysisVersion: savedTrack.aiAnalysisVersion,
             };
             if (savedTrack.aiError) refreshedTrack.aiError = savedTrack.aiError;
             else delete refreshedTrack.aiError;
@@ -2619,14 +2678,7 @@ function MusicPlayer() {
           };
         }
 
-        const updatedTracks = unavailableTrack
-          ? tracksRef.current.map((track) =>
-              track.id === unavailableTrack.id ? importedTrack : track,
-            )
-          : [...tracksRef.current, importedTrack];
-        await saveLibrary(updatedTracks);
-        tracksRef.current = updatedTracks;
-        setTracks(updatedTracks);
+        await persistImportedTrack(importedTrack);
         importedTracks.push(importedTrack);
         if (copiedFile) cleanup.copiedFiles.push(copiedFile);
         if (savedWebAudioId) cleanup.savedWebFiles.push(savedWebAudioId);
@@ -2675,13 +2727,13 @@ function MusicPlayer() {
           cleanup.copiedFiles,
         );
         const enrichedTrack = { ...importedTrack, ...metadata };
-        const updatedTracks = tracksRef.current.map((track) =>
-          track.id === id ? enrichedTrack : track,
-        );
-        tracksRef.current = updatedTracks;
-        setTracks(updatedTracks);
-        const importedIndex = importedTracks.findIndex((track) => track.id === id);
-        if (importedIndex >= 0) importedTracks[importedIndex] = enrichedTrack;
+        try {
+          await persistImportedTrack(enrichedTrack);
+          const importedIndex = importedTracks.findIndex((track) => track.id === id);
+          if (importedIndex >= 0) importedTracks[importedIndex] = enrichedTrack;
+        } catch (error) {
+          metadataPersistenceError ||= errorMessage(error);
+        }
       } catch (error) {
         metadataReadFailures += 1;
         console.warn(
@@ -2689,14 +2741,6 @@ function MusicPlayer() {
         );
       }
       onProgress?.(assetIndex + 1, audioAssets.length);
-    }
-
-    if (importedTracks.length > 0) {
-      try {
-        await saveLibrary(tracksRef.current);
-      } catch (error) {
-        metadataPersistenceError = errorMessage(error);
-      }
     }
 
     if (importedTracks.length === 0 && importFailures > 0) {
@@ -2736,7 +2780,7 @@ function MusicPlayer() {
       );
     }
     return { importedCount: importedTracks.length, failedCount: importFailures };
-  }, [makeWebObjectUrl, saveLibrary]);
+  }, [makeWebObjectUrl, persistImportedTrack]);
 
   const toggleAiFeatures = async () => {
     if (!aiSettingsReady || Platform.OS === 'web') return;
@@ -2759,6 +2803,7 @@ function MusicPlayer() {
       delete updatedTrack.aiError;
       delete updatedTrack.aiTags;
       delete updatedTrack.aiAnalyzedAt;
+      delete updatedTrack.aiAnalysisVersion;
       return updatedTrack;
     });
     try {
@@ -3665,7 +3710,22 @@ function MusicPlayer() {
             ]}
             showsVerticalScrollIndicator={false}
           >
-            <View style={styles.topBar}>
+            <View
+              style={[
+                styles.topBar,
+                Platform.OS === 'ios' && styles.settingsTopBar,
+              ]}
+            >
+              {Platform.OS === 'ios' && (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Back to library"
+                  onPress={() => setIsSettingsOpen(false)}
+                  style={styles.screenBackButton}
+                >
+                  <Text style={styles.screenBackText}>‹ BACK</Text>
+                </Pressable>
+              )}
               <View style={styles.brandLockup}>
                 <View style={styles.brandIcon}>
                   <Text style={styles.brandIconText}>♫</Text>
@@ -3805,13 +3865,16 @@ function MusicPlayer() {
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Add music from files"
-                accessibilityState={{ disabled: isImporting || isLoading }}
-                disabled={isImporting || isLoading}
+                accessibilityState={{
+                  disabled: isImporting || isLoading || isScanningDropFolder,
+                }}
+                disabled={isImporting || isLoading || isScanningDropFolder}
                 onPress={() => void importSongs()}
                 style={({ pressed }) => [
                   styles.addMenuOption,
                   pressed && styles.buttonPressed,
-                  (isImporting || isLoading) && styles.buttonDisabled,
+                  (isImporting || isLoading || isScanningDropFolder) &&
+                    styles.buttonDisabled,
                 ]}
               >
                 <DockIcon name="files" color={COLORS.accent} />
@@ -3822,13 +3885,16 @@ function MusicPlayer() {
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Add a music folder"
-                accessibilityState={{ disabled: isImporting || isLoading }}
-                disabled={isImporting || isLoading}
+                accessibilityState={{
+                  disabled: isImporting || isLoading || isScanningDropFolder,
+                }}
+                disabled={isImporting || isLoading || isScanningDropFolder}
                 onPress={() => void importMusicFolder()}
                 style={({ pressed }) => [
                   styles.addMenuOption,
                   pressed && styles.buttonPressed,
-                  (isImporting || isLoading) && styles.buttonDisabled,
+                  (isImporting || isLoading || isScanningDropFolder) &&
+                    styles.buttonDisabled,
                 ]}
               >
                 <DockIcon name="folder" color={COLORS.accent} />
@@ -4228,11 +4294,11 @@ function MusicPlayer() {
           <View style={styles.playerTopBar}>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Close player"
+              accessibilityLabel="Back to library"
               onPress={() => setIsPlayerOpen(false)}
               hitSlop={12}
             >
-              <Text style={styles.closePlayer}>⌄</Text>
+              <Text style={styles.closePlayer}>‹</Text>
             </Pressable>
             <View style={styles.playerTopCopy}>
               <Text style={styles.eyebrow}>NOW PLAYING</Text>
@@ -4955,6 +5021,21 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+  },
+  settingsTopBar: {
+    justifyContent: 'flex-start',
+    gap: 18,
+  },
+  screenBackButton: {
+    minHeight: 40,
+    justifyContent: 'center',
+    paddingRight: 4,
+  },
+  screenBackText: {
+    color: COLORS.accent,
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1,
   },
   themeToggle: {
     minHeight: 34,

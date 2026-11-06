@@ -3,7 +3,10 @@ import { Platform } from 'react-native';
 
 import { loadWebAudio } from './webAudioLibrary';
 import { analyzeAudio } from './musicAiInference';
-import type { MusicAiTag } from './musicAiTypes';
+import {
+  MUSIC_AI_ANALYSIS_VERSION,
+  type MusicAiTag,
+} from './musicAiTypes';
 
 export const MUSIC_LIBRARY_KEY = 'soundroom.library.v1';
 export const MUSIC_PLAYLISTS_KEY = 'soundroom.playlists.v1';
@@ -14,6 +17,7 @@ export type MusicAiTrack = {
   uri: string;
   aiTags?: MusicAiTag[];
   aiAnalyzedAt?: number;
+  aiAnalysisVersion?: number;
   aiError?: string;
 };
 
@@ -152,7 +156,14 @@ async function processPendingMusicAiTracksInternal(
   let failedCount = 0;
   for (let index = 0; index < tracks.length && processedCount < maximumTracks; index += 1) {
     const track = tracks[index];
-    if (!track || track.aiAnalyzedAt !== undefined || track.aiError) continue;
+    if (
+      !track ||
+      (track.aiAnalysisVersion === MUSIC_AI_ANALYSIS_VERSION &&
+        track.aiAnalyzedAt !== undefined) ||
+      track.aiError
+    ) {
+      continue;
+    }
     if (await AsyncStorage.getItem(MUSIC_AI_ENABLED_KEY) !== 'true') break;
 
     try {
@@ -170,6 +181,7 @@ async function processPendingMusicAiTracksInternal(
       failedCount += 1;
     }
     if (await AsyncStorage.getItem(MUSIC_AI_ENABLED_KEY) !== 'true') break;
+    track.aiAnalysisVersion = MUSIC_AI_ANALYSIS_VERSION;
     track.aiAnalyzedAt = Date.now();
     processedCount += 1;
   }
@@ -196,6 +208,7 @@ async function processPendingMusicAiTracksInternal(
       ...track,
       aiTags: analyzedTrack.aiTags ?? [],
       aiAnalyzedAt: analyzedTrack.aiAnalyzedAt,
+      aiAnalysisVersion: analyzedTrack.aiAnalysisVersion,
       ...(analyzedTrack.aiError ? { aiError: analyzedTrack.aiError } : {}),
     };
   });

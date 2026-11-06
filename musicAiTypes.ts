@@ -1,5 +1,7 @@
 export type MusicAiCategory = 'genre' | 'mood' | 'theme';
 
+export const MUSIC_AI_ANALYSIS_VERSION = 2;
+
 export type MusicAiTag = {
   category: MusicAiCategory;
   label: string;
