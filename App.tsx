@@ -257,7 +257,12 @@ function pickWebAudioFolder(): Promise<ImportAudioAsset[] | null> {
     };
     const onChange = () => {
       const assets = Array.from(input.files ?? [])
-        .map((file) => ({ name: file.name, mimeType: file.type, file }))
+        .map((file) => ({
+          name: file.name,
+          mimeType: file.type,
+          sourceUri: file.webkitRelativePath ? `folder:${file.webkitRelativePath}` : undefined,
+          file,
+        }))
         .filter(isAudioAsset);
       cleanup();
       resolve(assets);
@@ -1410,6 +1415,9 @@ function MusicPlayer() {
   const currentTrackIdRef = useRef<string | null>(null);
   const volumeChangeVersion = useRef(0);
   const aiAnalysisEffectRunRef = useRef(0);
+  const seekHoldIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const seekHoldActiveRef = useRef(false);
+  const seekHoldPositionRef = useRef(0);
   const libraryBlurTarget = useRef<ComponentRef<typeof View> | null>(null);
   const equalizerSource = useRef<MediaElementAudioSourceNode | null>(null);
   const equalizerFilters = useRef<BiquadFilterNode[]>([]);
@@ -2429,7 +2437,6 @@ function MusicPlayer() {
     if (nextIndex < 0 || nextIndex >= playbackQueue.length) return;
     playTrack(playbackQueue[nextIndex]);
   };
-
   const togglePlayback = () => {
     if (!currentTrack) {
       const queue =
@@ -2458,6 +2465,38 @@ function MusicPlayer() {
       setNotice(`Could not change playback position: ${errorMessage(error)}`);
     }
   };
+
+  const stopSeeking = () => {
+    if (seekHoldIntervalRef.current !== null) {
+      clearInterval(seekHoldIntervalRef.current);
+      seekHoldIntervalRef.current = null;
+    }
+  };
+
+  const startSeeking = (direction: 1 | -1) => {
+    stopSeeking();
+    seekHoldActiveRef.current = true;
+    seekHoldPositionRef.current = playback.currentTime;
+    const seekByStep = () => {
+      if (playback.duration <= 0) return;
+      seekHoldPositionRef.current = Math.max(
+        0,
+        Math.min(seekHoldPositionRef.current + direction * 5, playback.duration),
+      );
+      seekTo(seekHoldPositionRef.current);
+    };
+    seekByStep();
+    seekHoldIntervalRef.current = setInterval(seekByStep, 500);
+  };
+
+  useEffect(
+    () => () => {
+      if (seekHoldIntervalRef.current !== null) {
+        clearInterval(seekHoldIntervalRef.current);
+      }
+    },
+    [],
+  );
 
   const onAudioStatus = useCallback(
     (trackId: string, status: { currentTime: number; duration: number; playing: boolean }) => {
@@ -2722,6 +2761,7 @@ function MusicPlayer() {
             id,
             uri,
             fileName: asset.name,
+            sourceUri: asset.sourceUri,
             ...fallbackTrackMetadata(asset.file, fallback),
             addedAt,
           };
@@ -2895,6 +2935,7 @@ function MusicPlayer() {
     setIsAiReanalyzingAll(true);
     setIsAiAnalyzing(true);
     try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
       const tracksToReanalyze = await updateLibrary((currentTracks) =>
         currentTracks.map((track) => {
           const updatedTrack = { ...track };
@@ -2998,7 +3039,7 @@ function MusicPlayer() {
             if (entry instanceof Directory) {
               pendingDirectories.push(entry);
             } else if (isAudioFileName(entry.name)) {
-              assets.push({ name: entry.name, uri: entry.uri });
+              assets.push({ name: entry.name, uri: entry.uri, sourceUri: entry.uri });
             }
           }
         }
@@ -4273,6 +4314,32 @@ function MusicPlayer() {
                 </View>
                 <Pressable
                   accessibilityRole="button"
+                  accessibilityLabel="Previous song"
+                  accessibilityHint="Hold to rewind the current song."
+                  onPressIn={(event) => {
+                    event.stopPropagation();
+                    seekHoldActiveRef.current = false;
+                  }}
+                  onLongPress={(event) => {
+                    event.stopPropagation();
+                    startSeeking(-1);
+                  }}
+                  onPressOut={stopSeeking}
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    if (seekHoldActiveRef.current) {
+                      seekHoldActiveRef.current = false;
+                      return;
+                    }
+                    moveTrack(-1);
+                  }}
+                  hitSlop={8}
+                  style={styles.miniSkipButton}
+                >
+                  <Text style={styles.miniSkipGlyph}>|◀</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
                   accessibilityLabel={playback.playing ? 'Pause' : 'Play'}
                   onPress={(event) => {
                     event.stopPropagation();
@@ -4282,6 +4349,32 @@ function MusicPlayer() {
                   style={styles.miniPlayButton}
                 >
                   <DockIcon name={playback.playing ? 'pause' : 'play'} color={COLORS.ink} />
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Next song"
+                  accessibilityHint="Hold to fast-forward the current song."
+                  onPressIn={(event) => {
+                    event.stopPropagation();
+                    seekHoldActiveRef.current = false;
+                  }}
+                  onLongPress={(event) => {
+                    event.stopPropagation();
+                    startSeeking(1);
+                  }}
+                  onPressOut={stopSeeking}
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    if (seekHoldActiveRef.current) {
+                      seekHoldActiveRef.current = false;
+                      return;
+                    }
+                    moveTrack(1);
+                  }}
+                  hitSlop={8}
+                  style={styles.miniSkipButton}
+                >
+                  <Text style={styles.miniSkipGlyph}>▶|</Text>
                 </Pressable>
               </Pressable>
             </GlassSurface>
@@ -4545,7 +4638,19 @@ function MusicPlayer() {
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Previous song"
-                onPress={() => moveTrack(-1)}
+                accessibilityHint="Hold to rewind the current song."
+                onPressIn={() => {
+                  seekHoldActiveRef.current = false;
+                }}
+                onLongPress={() => startSeeking(-1)}
+                onPressOut={stopSeeking}
+                onPress={() => {
+                  if (seekHoldActiveRef.current) {
+                    seekHoldActiveRef.current = false;
+                    return;
+                  }
+                  moveTrack(-1);
+                }}
                 style={styles.skipButton}
               >
                 <Text style={styles.skipGlyph}>|◀</Text>
@@ -4561,7 +4666,19 @@ function MusicPlayer() {
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Next song"
-                onPress={() => moveTrack(1)}
+                accessibilityHint="Hold to fast-forward the current song."
+                onPressIn={() => {
+                  seekHoldActiveRef.current = false;
+                }}
+                onLongPress={() => startSeeking(1)}
+                onPressOut={stopSeeking}
+                onPress={() => {
+                  if (seekHoldActiveRef.current) {
+                    seekHoldActiveRef.current = false;
+                    return;
+                  }
+                  moveTrack(1);
+                }}
                 style={styles.skipButton}
               >
                 <Text style={styles.skipGlyph}>▶|</Text>
@@ -6034,6 +6151,17 @@ function createStyles(COLORS: ThemeColors, isLight: boolean) {
     backgroundColor: COLORS.accent,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  miniSkipButton: {
+    height: 39,
+    width: 27,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  miniSkipGlyph: {
+    color: COLORS.primaryText,
+    fontSize: 13,
+    fontWeight: '700',
   },
   playerScreen: {
     flex: 1,
