@@ -1,0 +1,32 @@
+diff --git a/node_modules/react-native-fast-tflite/android/src/main/java/com/margelo/nitro/tflite/HybridAssetLoader.kt b/node_modules/react-native-fast-tflite/android/src/main/java/com/margelo/nitro/tflite/HybridAssetLoader.kt
+index c2360f5..021e8d0 100644
+--- a/node_modules/react-native-fast-tflite/android/src/main/java/com/margelo/nitro/tflite/HybridAssetLoader.kt
++++ b/node_modules/react-native-fast-tflite/android/src/main/java/com/margelo/nitro/tflite/HybridAssetLoader.kt
+@@ -2,6 +2,7 @@ package com.margelo.nitro.tflite
+ 
+ import androidx.annotation.Keep
+ import com.facebook.proguard.annotations.DoNotStrip
++import com.margelo.nitro.NitroModules
+ import com.margelo.nitro.core.ArrayBuffer
+ import com.margelo.nitro.core.Promise
+ import java.net.URL
+@@ -11,7 +12,18 @@ import java.net.URL
+ class HybridAssetLoader : HybridAssetLoaderSpec() {
+   override fun loadAsset(path: String): Promise<ArrayBuffer> {
+     return Promise.async {
+-      val bytes = URL(path).readBytes()
++      val bytes =
++        if ("://" in path) {
++          URL(path).readBytes()
++        } else {
++          val context =
++            checkNotNull(NitroModules.applicationContext) {
++              "React Native application context is not available"
++            }
++          val resourceId = context.resources.getIdentifier(path, "raw", context.packageName)
++          check(resourceId != 0) { "Bundled Android asset '$path' was not found" }
++          context.resources.openRawResource(resourceId).use { it.readBytes() }
++        }
+       return@async ArrayBuffer.copy(bytes)
+     }
+   }

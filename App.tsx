@@ -1957,10 +1957,13 @@ function MusicPlayer() {
         setTracks(updatedTracks);
         setPlaylists(result.playlists);
         if (result.failedCount > 0) {
+          const firstFailure = result.tracks
+            .find((track) => track.aiError)
+            ?.aiError?.split('\n', 1)[0];
           setNotice(
             `AI analysis could not read ${result.failedCount} audio ${
               result.failedCount === 1 ? 'file' : 'files'
-            }. Other songs will continue to be analyzed.`,
+            }. ${firstFailure ? `Details: ${firstFailure}. ` : ''}Other songs will continue to be analyzed.`,
           );
         }
       })

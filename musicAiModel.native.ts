@@ -1,3 +1,4 @@
+import { File, Paths } from 'expo-file-system';
 import { decodeAudioData } from 'react-native-audio-api';
 import { loadTensorflowModel, type TfliteModel } from 'react-native-fast-tflite';
 
@@ -6,6 +7,7 @@ import { MUSIC_AI_CLASSES, type MusicAiTag } from './musicAiTypes';
 // YAMNet expects mono audio resampled to 16 kHz.
 const MODEL_SAMPLE_RATE = 16_000;
 const MAX_ANALYSIS_DURATION_SECONDS = 5 * 60;
+let temporaryAnalysisFileId = 0;
 // Metro resolves bundled TFLite models from static require calls.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const MODEL_ASSET = require('./assets/ai/yamnet.tflite') as number;
@@ -50,7 +52,7 @@ function getTags(scores: number[], classCount: number): MusicAiTag[] {
     .sort((first, second) => second.score - first.score);
 }
 
-export async function analyzeAudio(input: string | ArrayBuffer): Promise<MusicAiTag[]> {
+async function analyzeAudioInput(input: string | ArrayBuffer): Promise<MusicAiTag[]> {
   const [model, audio] = await Promise.all([
     getModel(),
     decodeAudioData(input, MODEL_SAMPLE_RATE, undefined, MAX_ANALYSIS_DURATION_SECONDS),
@@ -101,4 +103,21 @@ export async function analyzeAudio(input: string | ArrayBuffer): Promise<MusicAi
     summedScores.map((score) => score / offsets.length),
     classCount,
   );
+}
+
+export async function analyzeAudio(input: string | ArrayBuffer): Promise<MusicAiTag[]> {
+  if (typeof input !== 'string' || !input.startsWith('content://')) {
+    return analyzeAudioInput(input);
+  }
+
+  const temporaryFile = new File(
+    Paths.cache,
+    `soundroom-ai-${Date.now()}-${temporaryAnalysisFileId++}.audio`,
+  );
+  try {
+    await new File(input).copy(temporaryFile);
+    return await analyzeAudioInput(temporaryFile.uri);
+  } finally {
+    if (temporaryFile.exists) temporaryFile.delete();
+  }
 }
