@@ -13,8 +13,8 @@ const MODEL_SAMPLE_RATE = 16_000;
 const MAX_ANALYSIS_DURATION_SECONDS = 5 * 60;
 const TAG_SCORE_THRESHOLDS: Record<MusicAiCategory, number> = {
   genre: 0.08,
-  mood: 0.03,
-  theme: 0.03,
+  mood: 0.005,
+  theme: 0.005,
 };
 let temporaryAnalysisFileId = 0;
 // Metro resolves bundled TFLite models from static require calls.

@@ -2905,22 +2905,10 @@ function MusicPlayer() {
           return updatedTrack;
         }),
       );
-      let result = await processPendingMusicAiTracks(tracksToReanalyze.length);
-      let processedCount = 0;
-      let failedCount = 0;
-      let firstFailure: string | undefined;
-      while (true) {
-        processedCount += result.processedCount;
-        failedCount += result.failedCount;
-        firstFailure ??= result.tracks.find((track) => track.aiError)?.aiError;
-        await applyMusicAiResult(result);
-        const remainingCount = result.tracks.filter(
-          (track) =>
-            track.aiAnalysisVersion !== MUSIC_AI_ANALYSIS_VERSION && !track.aiError,
-        ).length;
-        if (remainingCount === 0 || result.processedCount === 0) break;
-        result = await processPendingMusicAiTracks(remainingCount);
-      }
+      const result = await processPendingMusicAiTracks(tracksToReanalyze.length);
+      await applyMusicAiResult(result);
+      const { processedCount, failedCount } = result;
+      const firstFailure = result.tracks.find((track) => track.aiError)?.aiError;
       setNotice(
         `AI analysis retriggered for ${processedCount} ${
           processedCount === 1 ? 'song' : 'songs'
