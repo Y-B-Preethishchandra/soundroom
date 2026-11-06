@@ -38,6 +38,18 @@ export type MusicAiProcessingResult = {
 };
 
 let processingPromise: Promise<MusicAiProcessingResult> | null = null;
+let musicStorageQueue: Promise<void> = Promise.resolve();
+
+export function withMusicStorageLock<T>(operation: () => Promise<T>): Promise<T> {
+  const pendingOperation = musicStorageQueue
+    .catch(() => undefined)
+    .then(operation);
+  musicStorageQueue = pendingOperation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return pendingOperation;
+}
 
 function isMusicAiTrack(value: unknown): value is MusicAiTrack {
   if (typeof value !== 'object' || value === null) return false;
@@ -195,36 +207,38 @@ async function processPendingMusicAiTracksInternal(
     };
   }
 
-  const latestLibrary = await AsyncStorage.getItem(MUSIC_LIBRARY_KEY);
-  const latestParsedLibrary: unknown = latestLibrary ? JSON.parse(latestLibrary) : [];
-  if (!Array.isArray(latestParsedLibrary) || !latestParsedLibrary.every(isMusicAiTrack)) {
-    throw new Error('The saved music library changed to an unreadable format.');
-  }
-  const analyzedById = new Map(tracks.map((track) => [track.id, track]));
-  const mergedTracks = latestParsedLibrary.map((track) => {
-    const analyzedTrack = analyzedById.get(track.id);
-    if (!analyzedTrack || analyzedTrack.aiAnalyzedAt === undefined) return track;
-    return {
-      ...track,
-      aiTags: analyzedTrack.aiTags ?? [],
-      aiAnalyzedAt: analyzedTrack.aiAnalyzedAt,
-      aiAnalysisVersion: analyzedTrack.aiAnalysisVersion,
-      ...(analyzedTrack.aiError ? { aiError: analyzedTrack.aiError } : {}),
-    };
-  });
+  return withMusicStorageLock(async () => {
+    const latestLibrary = await AsyncStorage.getItem(MUSIC_LIBRARY_KEY);
+    const latestParsedLibrary: unknown = latestLibrary ? JSON.parse(latestLibrary) : [];
+    if (!Array.isArray(latestParsedLibrary) || !latestParsedLibrary.every(isMusicAiTrack)) {
+      throw new Error('The saved music library changed to an unreadable format.');
+    }
+    const analyzedById = new Map(tracks.map((track) => [track.id, track]));
+    const mergedTracks = latestParsedLibrary.map((track) => {
+      const analyzedTrack = analyzedById.get(track.id);
+      if (!analyzedTrack || analyzedTrack.aiAnalyzedAt === undefined) return track;
+      return {
+        ...track,
+        aiTags: analyzedTrack.aiTags ?? [],
+        aiAnalyzedAt: analyzedTrack.aiAnalyzedAt,
+        aiAnalysisVersion: analyzedTrack.aiAnalysisVersion,
+        ...(analyzedTrack.aiError ? { aiError: analyzedTrack.aiError } : {}),
+      };
+    });
 
-  const latestSavedPlaylists = await AsyncStorage.getItem(MUSIC_PLAYLISTS_KEY);
-  const latestParsedPlaylists: unknown = latestSavedPlaylists
-    ? JSON.parse(latestSavedPlaylists)
-    : [];
-  if (
-    !Array.isArray(latestParsedPlaylists) ||
-    !latestParsedPlaylists.every(isMusicAiPlaylist)
-  ) {
-    throw new Error('The saved playlists changed to an unreadable format.');
-  }
-  const playlists = createGeneratedPlaylists(mergedTracks, latestParsedPlaylists);
-  await AsyncStorage.setItem(MUSIC_LIBRARY_KEY, JSON.stringify(mergedTracks));
-  await AsyncStorage.setItem(MUSIC_PLAYLISTS_KEY, JSON.stringify(playlists));
-  return { tracks: mergedTracks, playlists, processedCount, failedCount };
+    const latestSavedPlaylists = await AsyncStorage.getItem(MUSIC_PLAYLISTS_KEY);
+    const latestParsedPlaylists: unknown = latestSavedPlaylists
+      ? JSON.parse(latestSavedPlaylists)
+      : [];
+    if (
+      !Array.isArray(latestParsedPlaylists) ||
+      !latestParsedPlaylists.every(isMusicAiPlaylist)
+    ) {
+      throw new Error('The saved playlists changed to an unreadable format.');
+    }
+    const playlists = createGeneratedPlaylists(mergedTracks, latestParsedPlaylists);
+    await AsyncStorage.setItem(MUSIC_LIBRARY_KEY, JSON.stringify(mergedTracks));
+    await AsyncStorage.setItem(MUSIC_PLAYLISTS_KEY, JSON.stringify(playlists));
+    return { tracks: mergedTracks, playlists, processedCount, failedCount };
+  });
 }

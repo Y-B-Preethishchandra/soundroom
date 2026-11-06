@@ -64,6 +64,7 @@ import {
   MUSIC_LIBRARY_KEY,
   MUSIC_PLAYLISTS_KEY,
   processPendingMusicAiTracks,
+  withMusicStorageLock,
 } from './musicAi';
 import {
   registerMusicAiBackgroundTask,
@@ -1395,6 +1396,7 @@ function MusicPlayer() {
   const [aiEnabled, setAiEnabled] = useState(false);
   const [aiSettingsReady, setAiSettingsReady] = useState(false);
   const [isAiAnalyzing, setIsAiAnalyzing] = useState(false);
+  const [isAiReanalyzingAll, setIsAiReanalyzingAll] = useState(false);
   const isLightTheme = theme === 'light';
   const COLORS = THEME_COLORS[theme];
   const styles = useMemo(
@@ -1407,11 +1409,14 @@ function MusicPlayer() {
   const audioRef = useRef<AudioTagHandle>(null);
   const currentTrackIdRef = useRef<string | null>(null);
   const volumeChangeVersion = useRef(0);
+  const aiAnalysisEffectRunRef = useRef(0);
   const libraryBlurTarget = useRef<ComponentRef<typeof View> | null>(null);
   const equalizerSource = useRef<MediaElementAudioSourceNode | null>(null);
   const equalizerFilters = useRef<BiquadFilterNode[]>([]);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  const playlistsRef = useRef<Playlist[]>([]);
+  const playlistPersistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [playlistsReady, setPlaylistsReady] = useState(false);
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [playbackQueue, setPlaybackQueue] = useState<Track[]>([]);
@@ -1459,7 +1464,7 @@ function MusicPlayer() {
   const [isRepeating, setIsRepeating] = useState(false);
   const [notice, setNotice] = useState('');
   const tracksRef = useRef<Track[]>([]);
-  const libraryImportQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const libraryPersistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [queueRowOffsets, setQueueRowOffsets] = useState(
     () => new Map<string, Animated.Value>(),
   );
@@ -1556,41 +1561,87 @@ function MusicPlayer() {
     URL.revokeObjectURL(uri);
   };
 
-  const saveLibrary = useCallback((library: Track[]) =>
-    AsyncStorage.setItem(
-      LIBRARY_KEY,
-      JSON.stringify(
-        library.map((track) =>
-          Platform.OS === 'web'
-            ? {
-                ...track,
-                uri: track.uri.startsWith('blob:') ? webTrackUri(track.id) : track.uri,
-                artworkUri: track.artworkUri?.startsWith('blob:')
-                  ? webArtworkUri(track.id)
-                  : track.artworkUri,
-              }
-            : track,
+  const saveLibrary = useCallback(
+    (library: Track[]) =>
+      withMusicStorageLock(() =>
+        AsyncStorage.setItem(
+          LIBRARY_KEY,
+          JSON.stringify(
+            library.map((track) =>
+              Platform.OS === 'web'
+                ? {
+                    ...track,
+                    uri: track.uri.startsWith('blob:') ? webTrackUri(track.id) : track.uri,
+                    artworkUri: track.artworkUri?.startsWith('blob:')
+                      ? webArtworkUri(track.id)
+                      : track.artworkUri,
+                  }
+                : track,
+            ),
+          ),
         ),
       ),
-    ), []);
+    [],
+  );
 
-  const persistImportedTrack = useCallback((track: Track) => {
-    const persist = libraryImportQueueRef.current.catch(() => undefined).then(async () => {
-      const updatedTracks = tracksRef.current.some((existingTrack) => existingTrack.id === track.id)
-        ? tracksRef.current.map((existingTrack) =>
-            existingTrack.id === track.id ? track : existingTrack,
-          )
-        : [...tracksRef.current, track];
-      await saveLibrary(updatedTracks);
-      tracksRef.current = updatedTracks;
-      setTracks(updatedTracks);
-    });
-    libraryImportQueueRef.current = persist;
-    return persist;
-  }, [saveLibrary]);
+  const updateLibrary = useCallback(
+    (update: (currentTracks: Track[]) => Track[]) => {
+      const persist = libraryPersistenceQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const currentTracks = tracksRef.current;
+          const updatedTracks = update(currentTracks);
+          if (updatedTracks === currentTracks) return currentTracks;
+          await saveLibrary(updatedTracks);
+          tracksRef.current = updatedTracks;
+          setTracks(updatedTracks);
+          return updatedTracks;
+        });
+      libraryPersistenceQueueRef.current = persist.then(
+        () => undefined,
+        () => undefined,
+      );
+      return persist;
+    },
+    [saveLibrary],
+  );
 
-  const savePlaylists = (nextPlaylists: Playlist[]) =>
-    AsyncStorage.setItem(PLAYLISTS_KEY, JSON.stringify(nextPlaylists));
+  const persistImportedTrack = useCallback(
+    (track: Track) =>
+      updateLibrary((currentTracks) =>
+        currentTracks.some((existingTrack) => existingTrack.id === track.id)
+          ? currentTracks.map((existingTrack) =>
+              existingTrack.id === track.id ? track : existingTrack,
+            )
+          : [...currentTracks, track],
+      ),
+    [updateLibrary],
+  );
+
+  const savePlaylists = useCallback(
+    (nextPlaylists: Playlist[]) =>
+      withMusicStorageLock(() =>
+        AsyncStorage.setItem(PLAYLISTS_KEY, JSON.stringify(nextPlaylists)),
+      ),
+    [],
+  );
+
+  const updatePlaylists = useCallback(
+    (update: (currentPlaylists: Playlist[]) => Playlist[]) => {
+      const save = playlistPersistenceQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const updatedPlaylists = update(playlistsRef.current);
+          if (updatedPlaylists === playlistsRef.current) return;
+          await savePlaylists(updatedPlaylists);
+          playlistsRef.current = updatedPlaylists;
+          setPlaylists(updatedPlaylists);
+        });
+      playlistPersistenceQueueRef.current = save;
+      return save;
+    },
+    [savePlaylists],
+  );
 
   useEffect(() => {
     let active = true;
@@ -1664,15 +1715,21 @@ function MusicPlayer() {
 
   useEffect(() => {
     let active = true;
-    AsyncStorage.getItem(PLAYLISTS_KEY)
-      .then((saved) => {
-        if (!saved) return;
-        const parsed: unknown = JSON.parse(saved);
-        if (!Array.isArray(parsed)) {
-          throw new Error('Your saved playlists could not be read.');
-        }
-        if (active) setPlaylists(parsed.filter(isPlaylist));
-      })
+    const load = playlistPersistenceQueueRef.current.then(async () => {
+      const saved = await AsyncStorage.getItem(PLAYLISTS_KEY);
+      if (!saved) return;
+      const parsed: unknown = JSON.parse(saved);
+      if (!Array.isArray(parsed)) {
+        throw new Error('Your saved playlists could not be read.');
+      }
+      if (active) {
+        const loadedPlaylists = parsed.filter(isPlaylist);
+        playlistsRef.current = loadedPlaylists;
+        setPlaylists(loadedPlaylists);
+      }
+    });
+    playlistPersistenceQueueRef.current = load.catch(() => undefined);
+    void load
       .catch((error: unknown) => {
         if (active) setNotice(`Could not load playlists: ${errorMessage(error)}`);
       })
@@ -1838,6 +1895,43 @@ function MusicPlayer() {
     .map((track) => track.id)
     .join('|');
 
+  const applyMusicAiResult = useCallback(
+    async (result: Awaited<ReturnType<typeof processPendingMusicAiTracks>>) => {
+      if (result.processedCount === 0) return;
+      const updatesById = new Map(result.tracks.map((track) => [track.id, track]));
+      await updateLibrary((currentTracks) =>
+        currentTracks.map((track) => {
+          const analyzedTrack = updatesById.get(track.id);
+          if (!analyzedTrack || analyzedTrack.aiAnalyzedAt === undefined) return track;
+          const updatedTrack: Track = {
+            ...track,
+            aiTags: analyzedTrack.aiTags ?? [],
+            aiAnalyzedAt: analyzedTrack.aiAnalyzedAt,
+            aiAnalysisVersion: analyzedTrack.aiAnalysisVersion,
+          };
+          if (analyzedTrack.aiError) updatedTrack.aiError = analyzedTrack.aiError;
+          else delete updatedTrack.aiError;
+          return updatedTrack;
+        }),
+      );
+      await updatePlaylists((currentPlaylists) => [
+        ...currentPlaylists.filter((playlist) => !playlist.generatedByAi),
+        ...result.playlists.filter((playlist) => playlist.generatedByAi),
+      ]);
+      if (result.failedCount > 0) {
+        const firstFailure = result.tracks
+          .find((track) => track.aiError)
+          ?.aiError?.split('\n', 1)[0];
+        setNotice(
+          `AI analysis could not read ${result.failedCount} audio ${
+            result.failedCount === 1 ? 'file' : 'files'
+          }. ${firstFailure ? `Details: ${firstFailure}. ` : ''}Other songs will continue to be analyzed.`,
+        );
+      }
+    },
+    [updateLibrary, updatePlaylists],
+  );
+
   useEffect(() => {
     if (!aiSettingsReady || Platform.OS === 'web') return;
     const updateBackgroundSchedule = aiEnabled && pendingAiTrackIds
@@ -1980,13 +2074,14 @@ function MusicPlayer() {
       !aiSettingsReady ||
       Platform.OS === 'web' ||
       isLoading ||
-      !playlistsReady ||
-      !pendingAiTrackIds
+      !playlistsReady
     ) {
       return;
     }
+    if (!pendingAiTrackIds || isAiReanalyzingAll) return;
 
     let active = true;
+    const runVersion = ++aiAnalysisEffectRunRef.current;
     void Promise.resolve()
       .then(() => {
         if (!active) return undefined;
@@ -1994,41 +2089,16 @@ function MusicPlayer() {
         return processPendingMusicAiTracks(1);
       })
       .then(async (result) => {
-        if (!active || !result || result.processedCount === 0) return;
-        const updatesById = new Map(result.tracks.map((track) => [track.id, track]));
-        const updatedTracks = tracksRef.current.map((track) => {
-          const analyzedTrack = updatesById.get(track.id);
-          if (!analyzedTrack || analyzedTrack.aiAnalyzedAt === undefined) return track;
-          const updatedTrack: Track = {
-            ...track,
-            aiTags: analyzedTrack.aiTags ?? [],
-            aiAnalyzedAt: analyzedTrack.aiAnalyzedAt,
-            aiAnalysisVersion: analyzedTrack.aiAnalysisVersion,
-          };
-          if (analyzedTrack.aiError) updatedTrack.aiError = analyzedTrack.aiError;
-          else delete updatedTrack.aiError;
-          return updatedTrack;
-        });
-        await saveLibrary(updatedTracks);
-        if (!active) return;
-        setTracks(updatedTracks);
-        setPlaylists(result.playlists);
-        if (result.failedCount > 0) {
-          const firstFailure = result.tracks
-            .find((track) => track.aiError)
-            ?.aiError?.split('\n', 1)[0];
-          setNotice(
-            `AI analysis could not read ${result.failedCount} audio ${
-              result.failedCount === 1 ? 'file' : 'files'
-            }. ${firstFailure ? `Details: ${firstFailure}. ` : ''}Other songs will continue to be analyzed.`,
-          );
-        }
+        if (!active || !result) return;
+        await applyMusicAiResult(result);
       })
       .catch((error: unknown) => {
         if (active) setNotice(`Could not analyze music: ${errorMessage(error)}`);
       })
       .finally(() => {
-        if (active) setIsAiAnalyzing(false);
+        if (aiAnalysisEffectRunRef.current === runVersion) {
+          setIsAiAnalyzing(false);
+        }
       });
 
     return () => {
@@ -2040,7 +2110,8 @@ function MusicPlayer() {
     isLoading,
     pendingAiTrackIds,
     playlistsReady,
-    saveLibrary,
+    isAiReanalyzingAll,
+    applyMusicAiResult,
   ]);
 
   useEffect(() => {
@@ -2087,7 +2158,7 @@ function MusicPlayer() {
             return refreshedTrack;
           }),
         );
-        setPlaylists((currentPlaylists) => [
+        await updatePlaylists((currentPlaylists) => [
           ...currentPlaylists.filter((playlist) => !playlist.generatedByAi),
           ...parsedPlaylists.filter((playlist) => playlist.generatedByAi),
         ]);
@@ -2101,7 +2172,7 @@ function MusicPlayer() {
       active = false;
       subscription.remove();
     };
-  }, []);
+  }, [updatePlaylists]);
 
   const changeEqualizerSettings = useCallback((settings: EqualizerSettings) => {
     try {
@@ -2797,19 +2868,18 @@ function MusicPlayer() {
 
   const retryFailedAiAnalysis = async () => {
     if (!aiEnabled || aiFailedCount === 0) return;
-    const retriedTracks = tracks.map((track) => {
-      if (!track.aiError) return track;
-      const updatedTrack = { ...track };
-      delete updatedTrack.aiError;
-      delete updatedTrack.aiTags;
-      delete updatedTrack.aiAnalyzedAt;
-      delete updatedTrack.aiAnalysisVersion;
-      return updatedTrack;
-    });
     try {
-      await saveLibrary(retriedTracks);
-      tracksRef.current = retriedTracks;
-      setTracks(retriedTracks);
+      await updateLibrary((currentTracks) =>
+        currentTracks.map((track) => {
+          if (!track.aiError) return track;
+          const updatedTrack = { ...track };
+          delete updatedTrack.aiError;
+          delete updatedTrack.aiTags;
+          delete updatedTrack.aiAnalyzedAt;
+          delete updatedTrack.aiAnalysisVersion;
+          return updatedTrack;
+        }),
+      );
       setNotice(
         `Retrying AI analysis for ${aiFailedCount} ${
           aiFailedCount === 1 ? 'song' : 'songs'
@@ -2817,6 +2887,50 @@ function MusicPlayer() {
       );
     } catch (error) {
       setNotice(`Could not retry AI analysis: ${errorMessage(error)}`);
+    }
+  };
+
+  const reanalyzeAllTracks = async () => {
+    if (!aiEnabled || isAiAnalyzing || isAiReanalyzingAll || tracks.length === 0) return;
+    setIsAiReanalyzingAll(true);
+    setIsAiAnalyzing(true);
+    try {
+      const tracksToReanalyze = await updateLibrary((currentTracks) =>
+        currentTracks.map((track) => {
+          const updatedTrack = { ...track };
+          delete updatedTrack.aiError;
+          delete updatedTrack.aiTags;
+          delete updatedTrack.aiAnalyzedAt;
+          delete updatedTrack.aiAnalysisVersion;
+          return updatedTrack;
+        }),
+      );
+      let result = await processPendingMusicAiTracks(tracksToReanalyze.length);
+      let processedCount = 0;
+      let failedCount = 0;
+      let firstFailure: string | undefined;
+      while (true) {
+        processedCount += result.processedCount;
+        failedCount += result.failedCount;
+        firstFailure ??= result.tracks.find((track) => track.aiError)?.aiError;
+        await applyMusicAiResult(result);
+        const remainingCount = result.tracks.filter(
+          (track) =>
+            track.aiAnalysisVersion !== MUSIC_AI_ANALYSIS_VERSION && !track.aiError,
+        ).length;
+        if (remainingCount === 0 || result.processedCount === 0) break;
+        result = await processPendingMusicAiTracks(remainingCount);
+      }
+      setNotice(
+        `AI analysis retriggered for ${processedCount} ${
+          processedCount === 1 ? 'song' : 'songs'
+        }${failedCount > 0 ? `; ${failedCount} could not be read${firstFailure ? `: ${firstFailure}` : ''}` : ''}.`,
+      );
+    } catch (error) {
+      setNotice(`Could not reanalyze songs: ${errorMessage(error)}`);
+    } finally {
+      setIsAiAnalyzing(false);
+      setIsAiReanalyzingAll(false);
     }
   };
 
@@ -3152,7 +3266,6 @@ function MusicPlayer() {
   const removeTrack = (track: Track) => {
     const removeFromLibrary = () => {
       void (async () => {
-        const updatedTracks = tracks.filter((item) => item.id !== track.id);
         let playlistCleanupWarning: string | null = null;
         try {
           if (track.sourceUri) {
@@ -3163,21 +3276,24 @@ function MusicPlayer() {
             );
             setIgnoredDropSources(ignoredSources);
           }
-          await saveLibrary(updatedTracks);
-          const playlistsWithoutTrack = playlists.map((playlist) => ({
-            ...playlist,
-            trackIds: playlist.trackIds.filter((id) => id !== track.id),
-          }));
-          if (playlistsWithoutTrack.some((playlist, index) =>
-            playlist.trackIds.length !== playlists[index].trackIds.length,
-          )) {
-            try {
-              await savePlaylists(playlistsWithoutTrack);
-              setPlaylists(playlistsWithoutTrack);
-            } catch (error) {
-              playlistCleanupWarning =
-                `Song removed, but playlist membership could not be updated: ${errorMessage(error)}`;
-            }
+          await updateLibrary((currentTracks) =>
+            currentTracks.filter((item) => item.id !== track.id),
+          );
+          try {
+            await updatePlaylists((currentPlaylists) => {
+              const updatedPlaylists = currentPlaylists.map((playlist) => ({
+                ...playlist,
+                trackIds: playlist.trackIds.filter((id) => id !== track.id),
+              }));
+              return updatedPlaylists.some((playlist, index) =>
+                playlist.trackIds.length !== currentPlaylists[index].trackIds.length,
+              )
+                ? updatedPlaylists
+                : currentPlaylists;
+            });
+          } catch (error) {
+            playlistCleanupWarning =
+              `Song removed, but playlist membership could not be updated: ${errorMessage(error)}`;
           }
           if (currentTrack?.id === track.id) {
             audioRef.current?.pause();
@@ -3189,7 +3305,6 @@ function MusicPlayer() {
             });
           }
           setPlaybackQueue((queue) => queue.filter((item) => item.id !== track.id));
-          setTracks(updatedTracks);
           try {
             if (Platform.OS === 'web') {
               await removeWebAudio(track.id);
@@ -3245,7 +3360,7 @@ function MusicPlayer() {
       return;
     }
     if (
-      playlists.some(
+      playlistsRef.current.some(
         (playlist) =>
           playlist.id !== playlistEditorId &&
           playlist.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
@@ -3256,33 +3371,51 @@ function MusicPlayer() {
     }
 
     const now = Date.now();
-    const editingPlaylist = playlists.find((playlist) => playlist.id === playlistEditorId);
-    const updatedPlaylist: Playlist = editingPlaylist
-      ? { ...editingPlaylist, name, updatedAt: now }
-      : {
-          id: `${now}-${Math.random().toString(36).slice(2, 8)}`,
-          name,
-          trackIds: playlistEditorTrackId ? [playlistEditorTrackId] : [],
-          createdAt: now,
-          updatedAt: now,
-        };
-    const updatedPlaylists = editingPlaylist
-      ? playlists.map((playlist) =>
-          playlist.id === editingPlaylist.id ? updatedPlaylist : playlist,
-        )
-      : [...playlists, updatedPlaylist];
+    let isNewPlaylist = false;
 
     try {
-      await savePlaylists(updatedPlaylists);
-      setPlaylists(updatedPlaylists);
+      await updatePlaylists((currentPlaylists) => {
+        if (
+          currentPlaylists.some(
+            (playlist) =>
+              playlist.id !== playlistEditorId &&
+              playlist.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
+          )
+        ) {
+          throw new Error('A playlist with that name already exists.');
+        }
+        const editingPlaylist = currentPlaylists.find(
+          (playlist) => playlist.id === playlistEditorId,
+        );
+        isNewPlaylist = !editingPlaylist;
+        const updatedPlaylist: Playlist = editingPlaylist
+          ? { ...editingPlaylist, name, updatedAt: now }
+          : {
+              id: `${now}-${Math.random().toString(36).slice(2, 8)}`,
+              name,
+              trackIds: playlistEditorTrackId ? [playlistEditorTrackId] : [],
+              createdAt: now,
+              updatedAt: now,
+            };
+        return editingPlaylist
+          ? currentPlaylists.map((playlist) =>
+              playlist.id === editingPlaylist.id ? updatedPlaylist : playlist,
+            )
+          : [...currentPlaylists, updatedPlaylist];
+      });
       setIsPlaylistEditorOpen(false);
       setPlaylistEditorId(null);
       setPlaylistEditorTrackId(null);
       setPlaylistName('');
       setPlaylistFormError('');
-      if (!editingPlaylist) setNotice(`Playlist “${name}” created.`);
+      if (isNewPlaylist) setNotice(`Playlist “${name}” created.`);
     } catch (error) {
-      setPlaylistFormError(`Could not save playlist: ${errorMessage(error)}`);
+      const message = errorMessage(error);
+      setPlaylistFormError(
+        message === 'A playlist with that name already exists.'
+          ? message
+          : `Could not save playlist: ${message}`,
+      );
     }
   };
 
@@ -3291,20 +3424,22 @@ function MusicPlayer() {
     track: Track,
     updatedAt: number,
   ) => {
-    const hasTrack = playlist.trackIds.includes(track.id);
-    const updatedPlaylist: Playlist = {
-      ...playlist,
-      trackIds: hasTrack
-        ? playlist.trackIds.filter((id) => id !== track.id)
-        : [...playlist.trackIds, track.id],
-      updatedAt,
-    };
-    const updatedPlaylists = playlists.map((item) =>
-      item.id === playlist.id ? updatedPlaylist : item,
-    );
     try {
-      await savePlaylists(updatedPlaylists);
-      setPlaylists(updatedPlaylists);
+      await updatePlaylists((currentPlaylists) => {
+        const currentPlaylist = currentPlaylists.find((item) => item.id === playlist.id);
+        if (!currentPlaylist) return currentPlaylists;
+        const hasTrack = currentPlaylist.trackIds.includes(track.id);
+        const updatedPlaylist: Playlist = {
+          ...currentPlaylist,
+          trackIds: hasTrack
+            ? currentPlaylist.trackIds.filter((id) => id !== track.id)
+            : [...currentPlaylist.trackIds, track.id],
+          updatedAt,
+        };
+        return currentPlaylists.map((item) =>
+          item.id === playlist.id ? updatedPlaylist : item,
+        );
+      });
     } catch (error) {
       setNotice(`Could not update playlist: ${errorMessage(error)}`);
     }
@@ -3313,10 +3448,10 @@ function MusicPlayer() {
   const deletePlaylist = (playlist: Playlist) => {
     const confirmDelete = () => {
       void (async () => {
-        const updatedPlaylists = playlists.filter((item) => item.id !== playlist.id);
         try {
-          await savePlaylists(updatedPlaylists);
-          setPlaylists(updatedPlaylists);
+          await updatePlaylists((currentPlaylists) =>
+            currentPlaylists.filter((item) => item.id !== playlist.id),
+          );
           if (selectedPlaylistId === playlist.id) setSelectedPlaylistId(null);
           setNotice(`Playlist “${playlist.name}” deleted.`);
         } catch (error) {
@@ -3843,6 +3978,26 @@ function MusicPlayer() {
                   ]}
                 >
                   <Text style={styles.aiRetryButtonText}>Retry failed songs</Text>
+                </Pressable>
+              )}
+              {Platform.OS !== 'web' && aiEnabled && tracks.length > 0 && (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Reanalyze all songs"
+                  accessibilityState={{
+                    disabled: isAiAnalyzing || isAiReanalyzingAll,
+                  }}
+                  disabled={isAiAnalyzing || isAiReanalyzingAll}
+                  onPress={() => void reanalyzeAllTracks()}
+                  style={({ pressed }) => [
+                    styles.aiRetryButton,
+                    pressed && styles.buttonPressed,
+                    (isAiAnalyzing || isAiReanalyzingAll) && styles.buttonDisabled,
+                  ]}
+                >
+                  <Text style={styles.aiRetryButtonText}>
+                    {isAiReanalyzingAll ? 'Analyzing all songs…' : 'Reanalyze all songs'}
+                  </Text>
                 </Pressable>
               )}
               {Platform.OS !== 'web' && aiEnabled && (
